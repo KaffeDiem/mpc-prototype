@@ -19,3 +19,9 @@ Run with uv:
 ```bash
 uv run src/main.py 
 ```
+
+## Testing 
+
+```bash 
+uv run pytest
+```
