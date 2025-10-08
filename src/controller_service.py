@@ -18,12 +18,10 @@ class HeaterParams:
     temp_target: float = 60.0  # Target temperature (°C)
 
     # FCR-D parameters
-    fcrd_min_mw: float = 0.001  # Minimum capacity (MW) - assuming part of VPP
-    fcrd_response_time: float = 2.5  # seconds
     fcrd_delivery_min: int = 4  # Minimum 20 min = 4 timesteps of 5 min
 
     # Cost parameters
-    temp_comfort_weight: float = 100.0  # Penalty for temperature deviation
+    temp_comfort_weight: float = 20.0  # Penalty for temperature deviation
 
 
 class EconomicMPC:

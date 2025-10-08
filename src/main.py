@@ -49,7 +49,7 @@ def main():
     cum_revenue = 0.0
 
     params = HeaterParams(
-        temp_comfort_weight=0.0,
+        temp_comfort_weight=20.0,
     )
     controller = EconomicMPC(params=params, horizon_steps=24)
     T_current = 50.0 # Initial temperature
@@ -102,6 +102,11 @@ def main():
             )
 
         T_current = T_measured
+
+    print(f"\nTotal electricity cost: {cum_cost:.2f} DKK")
+    print(f"Total FCR-D revenue: {cum_revenue:.2f} DKK")
+    print(f"Net cost: {cum_cost - cum_revenue:.2f} DKK")
+    print("\nSimulation complete. Plotting results...")
 
     plot_results(results, params)
 
