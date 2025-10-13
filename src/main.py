@@ -3,7 +3,13 @@
 from datetime import date, timedelta
 import logging
 from prices_service import PricesService
-from controller_service import EconomicMPC, HeaterParams
+from predictor import (
+    Predictor,
+    PredictorInitialMeasurements,
+    ThermalSystemParams,
+    PredictorConfig,
+    Action
+)
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -27,10 +33,8 @@ def main():
     print(f"\nRetrieved {len(prices)} hourly prices:\n")
 
     horizon_hours = max(len(prices), 24) # Up to 24 hours horizon
-    timesteps_per_hour = 12
+    timesteps_per_hour = 1
     total_timesteps = horizon_hours * timesteps_per_hour
-    fcrd_prices = np.array(prices) * 2 # Assuming FCR-D prices are double the spot prices TODO: Replace with real forecast
-    fcrd_prices = np.repeat(fcrd_prices, timesteps_per_hour)
 
     spot_prices = np.repeat(prices, timesteps_per_hour)
 
@@ -38,149 +42,173 @@ def main():
         "time": [],
         "temperature": [],
         "heater_on": [],
-        "fcrd_capacity": [],
         "spot_price": [],
-        "fcrd_price": [],
         "electricity_cost": [],
-        "fcrd_revenue": [],
+        "heating_rate": [],  # Track learned heating rate
+        "cooling_coeff": [],  # Track learned cooling coefficient
     }
 
     cum_cost = 0.0
-    cum_revenue = 0.0
 
-    params = HeaterParams(
-        temp_comfort_weight=20.0,
+    # Initialize predictor with initial parameter guesstimates (intentionally slightly wrong)
+    thermal_system = ThermalSystemParams.water_heater(
+        heating_rate_k_per_step=4.0,  # Initial guess (true might be 0.5)
+        cooling_coefficient=0.015,     # Initial guess (true might be 0.02)
+        ambient_temp_celsius=20.0
     )
-    controller = EconomicMPC(params=params, horizon_steps=24)
-    T_current = 50.0 # Initial temperature
+    config = PredictorConfig(
+        temp_min=318.15,  # 45°C
+        temp_max=343.15,  # 70°C
+        steps_per_hour=timesteps_per_hour
+    )
+    predictor = Predictor(
+        PredictorInitialMeasurements(thermal_system=thermal_system),
+        config=config
+    )
+
+    T_current = 323.15  # Start at 50°C = 323.15K (slightly below target)
+    watts_on = 3000.0  # 3kW heater
 
     for t in range(total_timesteps):
         current_hour = (t // timesteps_per_hour) % 24
 
-        # Run MPC optimization every timestep (in practice, could be less frequent)
-        optimal_u, info = controller.optimize(
-            T_current, spot_prices[t:], fcrd_prices[t:], current_hour
+        # Get remaining prices for optimization horizon
+        remaining_prices = spot_prices[t:].tolist()
+
+        # Get next action from predictor
+        pred_result = predictor.get_next_action(
+            current_temp=T_current,
+            future_prices=remaining_prices,
+            ambient_temp=thermal_system.ambient_temp_k,
+            watts_on=watts_on
         )
 
-        # Get control action
-        heater_on, fcrd_capacity = controller.get_control_action(optimal_u)
+        heater_on = pred_result.action == Action.ON
 
-        # Apply control and simulate physics
-        T_next = controller.predict_temperature(T_current, heater_on, timesteps=1)
+        # Simulate true physics (with slightly different parameters than initial guess)
+        # This simulates reality where true parameters are unknown
+        true_heating_rate = 1.5  # True value (predictor starts with 0.3)
+        true_cooling_coeff = 0.02  # True value (predictor starts with 0.015)
+        temp_diff = T_current - thermal_system.ambient_temp_k
+        heating_delta = true_heating_rate if heater_on else 0.0
+        cooling_delta = -true_cooling_coeff * temp_diff
+        T_next = T_current + heating_delta + cooling_delta
 
         # Add small measurement noise
-        T_measured = T_next + np.random.normal(0, 0.2)
+        T_measured = T_next + np.random.normal(0, 0.1)
+
+        # Update predictor's model (adaptive learning with RLS)
+        predictor.update_model(T_current, pred_result.action, T_measured)
 
         # Calculate costs
-        energy_kwh = params.power_kw * controller.timestep_hours if heater_on else 0.0
+        timestep_hours = 5 / 60  # 5 minutes
+        energy_kwh = (watts_on / 1000) * timestep_hours if heater_on else 0.0
         cost = energy_kwh * spot_prices[t]
-        revenue = fcrd_capacity * fcrd_prices[t] * controller.timestep_hours
 
         cum_cost += cost
-        cum_revenue += revenue
 
         # Store results
-        results["time"].append(t * 5 / 60)  # Convert to hours
+        results["time"].append(t * timestep_hours)
         results["temperature"].append(T_measured)
         results["heater_on"].append(heater_on)
-        results["fcrd_capacity"].append(fcrd_capacity)
         results["spot_price"].append(spot_prices[t])
-        results["fcrd_price"].append(fcrd_prices[t])
         results["electricity_cost"].append(cost)
-        results["fcrd_revenue"].append(revenue)
-
-        # Update model (adaptive learning)
-        controller.update_model(T_measured, heater_on)
+        results["heating_rate"].append(predictor.theta[0])
+        results["cooling_coeff"].append(predictor.theta[1])
 
         # Progress update
         if t % (timesteps_per_hour * 2) == 0:  # Every 2 hours
             print(
-                f"Hour {current_hour:2d}: T={T_measured:.1f}°C, "
+                f"Hour {current_hour:2d}: T={T_measured-273.15:.1f}°C, "
                 f"Heater={'ON' if heater_on else 'OFF'}, "
-                f"FCR-D={fcrd_capacity*1000:.1f}kW, "
-                f"Net Cost={cum_cost-cum_revenue:.2f} DKK"
+                f"Cost={cum_cost:.2f} DKK, "
+                f"Learned: h={predictor.theta[0]:.3f}, c={predictor.theta[1]:.4f}"
             )
 
         T_current = T_measured
 
-    print(f"\nTotal electricity cost: {cum_cost:.2f} DKK")
-    print(f"Total FCR-D revenue: {cum_revenue:.2f} DKK")
-    print(f"Net cost: {cum_cost - cum_revenue:.2f} DKK")
-    print("\nSimulation complete. Plotting results...")
+    # Calculate statistics
+    temps_celsius = np.array(results["temperature"]) - 273.15
+    temp_min_c = config.temp_min - 273.15
+    temp_max_c = config.temp_max - 273.15
 
-    plot_results(results, params)
+    print(f"\n{'='*60}")
+    print(f"SIMULATION RESULTS - Adaptive Predictor with RLS")
+    print(f"{'='*60}")
+    print(f"Total electricity cost: {cum_cost:.2f} DKK")
+    print(f"\nTemperature Statistics:")
+    print(f"  Range: {temps_celsius.min():.1f}°C - {temps_celsius.max():.1f}°C")
+    print(f"  Mean: {temps_celsius.mean():.1f}°C")
+    print(f"  Allowed range: {temp_min_c:.1f}°C - {temp_max_c:.1f}°C")
+    print(f"  Range utilization: {temps_celsius.max() - temps_celsius.min():.1f}°C of {temp_max_c - temp_min_c:.1f}°C available")
+    print(f"\nHeater Usage:")
+    heater_on_pct = np.mean(results["heater_on"]) * 100
+    print(f"  On: {heater_on_pct:.1f}% of time")
+    print(f"  Total energy: {cum_cost / np.mean(results['spot_price']):.2f} kWh")
+    print(f"\nAdaptive Learning:")
+    print(f"  Initial heating rate: 0.3 K/step")
+    print(f"  Final heating rate: {predictor.theta[0]:.3f} K/step (true: 0.5)")
+    print(f"  Initial cooling coeff: 0.015")
+    print(f"  Final cooling coeff: {predictor.theta[1]:.4f} (true: 0.02)")
+    print(f"  Mean prediction error: {np.mean(np.abs(predictor.prediction_errors)):.3f} K")
+    print(f"{'='*60}\n")
+    print("Simulation complete. Plotting results...")
+
+    plot_results(results, config)
+
+
+def plot_results(results, config):
+    """Create visualization of simulation results"""
+    fig, axes = plt.subplots(5, 1, figsize=(12, 12))
+
+    time = np.array(results["time"])
+
+    # Temperature - Convert from Kelvin to Celsius for display
+    temp_celsius = np.array(results["temperature"]) - 273.15
+    min_celsius = config.temp_min - 273.15
+    max_celsius = config.temp_max - 273.15
+
+    axes[0].plot(time, temp_celsius, "b-", linewidth=2)
+    axes[0].axhline(min_celsius, color="r", linestyle="--", label="Min")
+    axes[0].axhline(max_celsius, color="r", linestyle="--", label="Max")
+    axes[0].set_ylabel("Temperature (°C)")
+    axes[0].set_title("Adaptive Predictor with RLS - 24h Simulation")
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    # Heater status
+    heater_on = np.array(results["heater_on"])
+    axes[1].fill_between(
+        time, 0, heater_on, alpha=0.3, color="orange", label="Heater ON"
+    )
+    axes[1].set_ylabel("Heater Status")
+    axes[1].legend(loc="upper left")
+    axes[1].grid(True, alpha=0.3)
+
+    # Spot prices
+    axes[2].plot(time, results["spot_price"], "b-", linewidth=2, label="Spot Price")
+    axes[2].set_ylabel("Spot Price (DKK/kWh)")
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+
+    # Learned parameters over time
+    axes[3].plot(time, results["heating_rate"], "r-", linewidth=2, label="Heating Rate")
+    axes[3].axhline(1.5, color="r", linestyle="--", alpha=0.5, label="True value (1.5)")
+    axes[3].set_ylabel("Heating Rate (K/step)")
+    axes[3].legend()
+    axes[3].grid(True, alpha=0.3)
+
+    axes[4].plot(time, results["cooling_coeff"], "b-", linewidth=2, label="Cooling Coefficient")
+    axes[4].axhline(0.02, color="b", linestyle="--", alpha=0.5, label="True value (0.02)")
+    axes[4].set_ylabel("Cooling Coefficient")
+    axes[4].set_xlabel("Time (hours)")
+    axes[4].legend()
+    axes[4].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("adaptive_predictor_results.png")
+    plt.show()
 
 
 if __name__ == "__main__":
     main()
-
-
-def plot_results(results, params):
-    """Create visualization of simulation results"""
-    fig, axes = plt.subplots(4, 1, figsize=(12, 10))
-
-    time = np.array(results["time"])
-
-    # Temperature
-    axes[0].plot(time, results["temperature"], "b-", linewidth=2)
-    axes[0].axhline(params.temp_target, color="g", linestyle="--", label="Target")
-    axes[0].axhline(params.temp_min, color="r", linestyle="--", label="Min")
-    axes[0].axhline(params.temp_max, color="r", linestyle="--", label="Max")
-    axes[0].set_ylabel("Temperature (°C)")
-    axes[0].set_title("Water Heater Economic MPC - 24h Simulation")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    # Heater status and FCR-D
-    ax_heater = axes[1]
-    ax_fcrd = ax_heater.twinx()
-
-    heater_on = np.array(results["heater_on"])
-    ax_heater.fill_between(
-        time, 0, heater_on, alpha=0.3, color="orange", label="Heater ON"
-    )
-    ax_fcrd.plot(
-        time,
-        np.array(results["fcrd_capacity"]) * 1000,
-        "g-",
-        linewidth=2,
-        label="FCR-D Capacity",
-    )
-
-    ax_heater.set_ylabel("Heater Status")
-    ax_fcrd.set_ylabel("FCR-D Capacity (kW)", color="g")
-    ax_heater.legend(loc="upper left")
-    ax_fcrd.legend(loc="upper right")
-    ax_heater.grid(True, alpha=0.3)
-
-    # Prices
-    ax_spot = axes[2]
-    ax_fcrd_price = ax_spot.twinx()
-
-    ax_spot.plot(time, results["spot_price"], "b-", linewidth=2, label="Spot Price")
-    ax_fcrd_price.plot(
-        time, results["fcrd_price"], "g-", linewidth=2, label="FCR-D Price"
-    )
-
-    ax_spot.set_ylabel("Spot Price (DKK/kWh)", color="b")
-    ax_fcrd_price.set_ylabel("FCR-D Price (DKK/MW/h)", color="g")
-    ax_spot.legend(loc="upper left")
-    ax_fcrd_price.legend(loc="upper right")
-    ax_spot.grid(True, alpha=0.3)
-
-    # Cumulative costs and revenues
-    cumulative_cost = np.cumsum(results["electricity_cost"])
-    cumulative_revenue = np.cumsum(results["fcrd_revenue"])
-    net_cost = cumulative_cost - cumulative_revenue
-
-    axes[3].plot(time, cumulative_cost, "r-", linewidth=2, label="Electricity Cost")
-    axes[3].plot(time, cumulative_revenue, "g-", linewidth=2, label="FCR-D Revenue")
-    axes[3].plot(time, net_cost, "b-", linewidth=2, label="Net Cost")
-    axes[3].set_ylabel("Cumulative (DKK)")
-    axes[3].set_xlabel("Time (hours)")
-    axes[3].legend()
-    axes[3].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig("mpc_simulation_results.png")
-    plt.show()

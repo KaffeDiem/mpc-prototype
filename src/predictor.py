@@ -88,6 +88,27 @@ class Predictor:
         self.thermal_system = initial_measurements.thermal_system
         self.config = config
 
+        # RLS adaptive learning state
+        # Parameter vector: θ = [heating_rate_k_per_step, cooling_coefficient]
+        self.theta = np.array([
+            self.thermal_system.heating_rate_k_per_step,
+            self.thermal_system.cooling_coefficient
+        ])
+
+        # Covariance matrix (initialized with high values for initial uncertainty)
+        self.P = np.eye(2) * 100.0
+
+        # Forgetting factor (0.95-0.99): higher = trust old data more
+        self.lambda_rls = 0.98
+
+        # History tracking
+        self.observation_history: list[tuple[float, Action, float]] = []  # (temp_before, action, temp_after)
+        self.prediction_errors: list[float] = []
+
+        # Parameter bounds for physical validity
+        self.heating_rate_bounds = (0.01, 10.0)  # K/step
+        self.cooling_coeff_bounds = (0.001, 0.5)  # Must be positive and < 1
+
     def get_next_action(
         self,
         current_temp: float,
@@ -121,36 +142,43 @@ class Predictor:
     ) -> PredictorResult:
         """
         Optimize the action sequence to minimize cost over the prediction horizon.
+        Now properly simulates temperature trajectory and enforces constraints.
         """
 
         def objective(actions: np.ndarray) -> float:
+            # Convert to action sequence
+            action_sequence = [Action.ON if a >= 0.5 else Action.OFF for a in actions]
+
+            # Calculate electricity cost
             sequence_price = self._price_for_sequence(
                 future_prices=future_prices,
-                sequence=[Action.ON if a >= 0.5 else Action.OFF for a in actions],
+                sequence=action_sequence,
                 watts_on=watts_on,
             )
 
-            outside_comfort_penalty = 0.0
-            if (
-                current_temp > self.config.temp_max
-                or current_temp < self.config.temp_min
-            ):
-                outside_comfort_penalty = (
-                    100.0  # Penalty for being outside comfort zone
-                )
+            # Simulate temperature trajectory and penalize constraint violations
+            temp = current_temp
+            comfort_penalty = 0.0
 
-            total = sequence_price + outside_comfort_penalty
-            print(f"-- Minimization step --")
-            print(
-                f"Sequence price: {sequence_price}, Outside comfort penalty: {outside_comfort_penalty}, Total: {total}"
-            )
-            print("Minimizing with actions:", actions)
+            for action in action_sequence:
+                # Predict next temperature
+                temp = self._predict_future_temperature(action, temp)
+
+                # Penalize violations of temperature bounds
+                if temp < self.config.temp_min:
+                    comfort_penalty += 100.0 * (self.config.temp_min - temp) ** 2
+                elif temp > self.config.temp_max:
+                    comfort_penalty += 100.0 * (temp - self.config.temp_max) ** 2
+
+            total = sequence_price + comfort_penalty
             return total
 
+        # Optimize action sequence
         result = minimize(
             fun=objective,
             x0=[0.0] * len(future_prices),
             bounds=[(0, 1)] * len(future_prices),
+            options={'disp': False}  # Suppress output
         )
 
         actions = [Action.ON if a >= 0.5 else Action.OFF for a in result.x]
@@ -187,6 +215,71 @@ class Predictor:
         delta_temp = heating_delta + cooling_delta
 
         return current_temp + delta_temp
+
+    def update_model(self, temp_before: float, action_taken: Action, temp_after: float):
+        """
+        Update model parameters using Recursive Least Squares (RLS).
+
+        Args:
+            temp_before: Temperature before action (Kelvin)
+            action_taken: Action that was taken (ON/OFF)
+            temp_after: Observed temperature after action (Kelvin)
+        """
+        # Store observation
+        self.observation_history.append((temp_before, action_taken, temp_after))
+
+        # Need at least one observation to update
+        if len(self.observation_history) < 2:
+            return
+
+        # Observed temperature change
+        delta_temp_observed = temp_after - temp_before
+
+        # Predicted temperature change using current parameters
+        delta_temp_predicted = self._predict_delta_temp(action_taken, temp_before)
+
+        # Prediction error
+        prediction_error = delta_temp_observed - delta_temp_predicted
+        self.prediction_errors.append(prediction_error)
+
+        # Build regressor vector φ
+        # Model: ΔT = heating_rate × action - cooling_coefficient × (T - T_ambient)
+        temp_diff = temp_before - self.thermal_system.ambient_temp_k
+        action_value = 1.0 if action_taken == Action.ON else 0.0
+
+        phi = np.array([
+            action_value,           # Coefficient for heating_rate
+            -temp_diff              # Coefficient for cooling_coefficient
+        ])
+
+        # RLS update
+        # K = P·φ / (λ + φᵀ·P·φ)
+        P_phi = self.P @ phi
+        denominator = self.lambda_rls + phi @ P_phi
+
+        if abs(denominator) > 1e-10:  # Avoid division by zero
+            K = P_phi / denominator
+
+            # Update parameters: θ = θ + K·e
+            self.theta = self.theta + K * prediction_error
+
+            # Update covariance: P = (P - K·φᵀ·P) / λ
+            self.P = (self.P - np.outer(K, P_phi)) / self.lambda_rls
+
+            # Apply parameter bounds for physical validity
+            self.theta[0] = np.clip(self.theta[0], *self.heating_rate_bounds)
+            self.theta[1] = np.clip(self.theta[1], *self.cooling_coeff_bounds)
+
+            # Update thermal system parameters with learned values
+            self.thermal_system.heating_rate_k_per_step = self.theta[0]
+            self.thermal_system.cooling_coefficient = self.theta[1]
+
+    def _predict_delta_temp(self, action: Action, current_temp: float) -> float:
+        """Helper to predict temperature change (not absolute temperature)"""
+        temp_diff = current_temp - self.thermal_system.ambient_temp_k
+        cooling_delta = -self.thermal_system.cooling_coefficient * temp_diff
+        heating_delta = self.thermal_system.heating_rate_k_per_step if action == Action.ON else 0.0
+        return heating_delta + cooling_delta
 
     def plot(self, save_path: str):
         # Implement plotting logic for visualizing predictions
