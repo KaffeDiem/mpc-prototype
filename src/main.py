@@ -99,7 +99,7 @@ def main():
 
     while True:
         spot_prices = np.repeat(prices, steps_per_hour)
-        current_temperature_k = celsius_to_kelvin(smart_plug_service.get_status().temperature_c)
+        current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
         ambient_temp_c = weather_service.get_current_temperature()
 
         prediction = controller.get_next_action(
@@ -137,7 +137,7 @@ def main():
         print("--------------------------------")
         print(f"Step {step_counter}:")
         print(f"Action taken: {prediction.action}")
-        print(f"Current temperature: {current_temperature_k}")
+        print(f"Current temperature: {kelvin_to_celsius(current_temperature_k)}")
         print(f"Ambient temperature: {ambient_temp_c}")
 
         time.sleep(seconds_per_step)  # Wait for next step
