@@ -30,10 +30,12 @@ def main():
     
     prices = service.get_prices(today, tomorrow)
     prices = [p.price for p in prices] # Extract just the price values
-    print(f"\nRetrieved {len(prices)} hourly prices:\n")
+    print(f"\nRetrieved {len(prices)} hourly prices:")
+    print(f"Price range: {min(prices):.3f} - {max(prices):.3f} DKK/kWh")
+    print(f"Mean price: {sum(prices)/len(prices):.3f} DKK/kWh\n")
 
-    horizon_hours = max(len(prices), 24) # Up to 24 hours horizon
-    timesteps_per_hour = 1
+    horizon_hours = 24 # Limit to 24 hours for performance
+    timesteps_per_hour = 2  # 30-minute intervals (balance between resolution and speed)
     total_timesteps = horizon_hours * timesteps_per_hour
 
     spot_prices = np.repeat(prices, timesteps_per_hour)
@@ -52,13 +54,13 @@ def main():
 
     # Initialize predictor with initial parameter guesstimates (intentionally slightly wrong)
     thermal_system = ThermalSystemParams.water_heater(
-        heating_rate_k_per_step=4.0,  # Initial guess (true might be 0.5)
+        heating_rate_k_per_step=1.5,  # Initial guess (true is 1.5)
         cooling_coefficient=0.015,     # Initial guess (true might be 0.02)
         ambient_temp_celsius=20.0
     )
     config = PredictorConfig(
         temp_min=318.15,  # 45°C
-        temp_max=343.15,  # 70°C
+        temp_max=333.15,  # 60°C - more realistic max for water heater
         steps_per_hour=timesteps_per_hour
     )
     predictor = Predictor(
@@ -101,7 +103,7 @@ def main():
         predictor.update_model(T_current, pred_result.action, T_measured)
 
         # Calculate costs
-        timestep_hours = 5 / 60  # 5 minutes
+        timestep_hours = 1.0 / timesteps_per_hour  # Dynamic based on configuration
         energy_kwh = (watts_on / 1000) * timestep_hours if heater_on else 0.0
         cost = energy_kwh * spot_prices[t]
 
@@ -207,7 +209,7 @@ def plot_results(results, config):
 
     plt.tight_layout()
     plt.savefig("adaptive_predictor_results.png")
-    plt.show()
+    print("Plot saved to adaptive_predictor_results.png")
 
 
 if __name__ == "__main__":

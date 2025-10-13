@@ -106,8 +106,8 @@ class Predictor:
         self.prediction_errors: list[float] = []
 
         # Parameter bounds for physical validity
-        self.heating_rate_bounds = (0.01, 10.0)  # K/step
-        self.cooling_coeff_bounds = (0.001, 0.5)  # Must be positive and < 1
+        self.heating_rate_bounds = (0.5, 3.0)  # K/step - tighter bounds for stability
+        self.cooling_coeff_bounds = (0.010, 0.030)  # Must be positive - tighter bounds
 
     def get_next_action(
         self,
@@ -164,21 +164,39 @@ class Predictor:
                 # Predict next temperature
                 temp = self._predict_future_temperature(action, temp)
 
-                # Penalize violations of temperature bounds
+                # Penalize violations of temperature bounds (hard constraints)
                 if temp < self.config.temp_min:
-                    comfort_penalty += 100.0 * (self.config.temp_min - temp) ** 2
+                    comfort_penalty += 1000.0 * (self.config.temp_min - temp) ** 2
                 elif temp > self.config.temp_max:
-                    comfort_penalty += 100.0 * (temp - self.config.temp_max) ** 2
+                    comfort_penalty += 1000.0 * (temp - self.config.temp_max) ** 2
 
             total = sequence_price + comfort_penalty
             return total
 
+        # Limit optimization horizon (max 24 hours look-ahead) 
+        optimization_horizon_hours = min(24, len(future_prices))
+        optimization_steps = optimization_horizon_hours * self.config.steps_per_hour
+
+        # Create initial guess based on price patterns
+        # Prefer heating during cheaper periods
+        avg_price = sum(future_prices[:optimization_horizon_hours]) / optimization_horizon_hours if optimization_horizon_hours > 0 else 1.0
+        x0 = []
+        for hour_idx in range(optimization_horizon_hours):
+            for _ in range(self.config.steps_per_hour):
+                if hour_idx < len(future_prices):
+                    # Turn on more likely if price is below average
+                    initial_action = 1.0 if future_prices[hour_idx] < avg_price else 0.0
+                    x0.append(initial_action)
+
+        # Ensure x0 has correct length
+        assert(len(x0) == optimization_steps)
+
         # Optimize action sequence
         result = minimize(
             fun=objective,
-            x0=[0.0] * len(future_prices),
-            bounds=[(0, 1)] * len(future_prices),
-            options={'disp': False}  # Suppress output
+            x0=x0,
+            bounds=[(0, 1)] * len(x0),
+            options={'disp': False, 'maxiter': 100}  # Limit iterations for speed
         )
 
         actions = [Action.ON if a >= 0.5 else Action.OFF for a in result.x]
