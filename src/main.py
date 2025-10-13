@@ -1,8 +1,11 @@
 """Simple example usage of the PricesService to fetch Danish electricity prices."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import time
 import logging
+import csv
+import signal
+import sys
 from prices_service import PricesService
 from weather_service import WeatherService
 from smart_plug_service import SmartPlugService
@@ -17,11 +20,45 @@ logging.basicConfig(
     level=logging.WARNING, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
+# Global variables for signal handler
+csv_file = None
+csv_filename = None
+
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully"""
+    print(f"\n\nShutting down gracefully...")
+    if csv_file:
+        csv_file.close()
+        print(f"Stats saved to {csv_filename}")
+    sys.exit(0)
+
 
 def main():
+    global csv_file, csv_filename
+    
+    # Register signal handler for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    
     steps_per_hour = 12  # 5-minute intervals
     seconds_per_step = 3600 / steps_per_hour
     start_time = time.time()
+    
+    # Create CSV file with timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    csv_filename = f"stats_{timestamp}.csv"
+    csv_file = open(csv_filename, 'w', newline='', buffering=1)
+    csv_writer = csv.writer(csv_file)
+    
+    # Write CSV headers
+    csv_writer.writerow([
+        'timestamp', 'step', 'current_temp_c', 'ambient_temp_c', 
+        'action', 'watts_on', 'spot_price', 'heating_rate', 
+        'cooling_coeff', 'predicted_temp_c', 'predicted_power'
+    ])
+    
+    print(f"Logging stats to {csv_filename}")
+    print("Press Ctrl+C to stop...\n")
 
     # Initialize service for DK2 region (Copenhagen/East of Great Belt)
     # Use "DK1" for Aarhus/West of Great Belt
@@ -58,7 +95,8 @@ def main():
     watts_on = smart_plug_service.get_status().power_watts
 
     current_temperature_k = celsius_to_kelvin(50.0)  # Initial temperature guess
-    prev_temperature_k = current_temperature_k
+    
+    step_counter = 0
 
     while True:
         spot_prices = np.repeat(prices, steps_per_hour)
@@ -72,13 +110,49 @@ def main():
             watts_on=watts_on
         )
 
+        # Determine current spot price based on step counter
+        current_hour_index = step_counter // steps_per_hour
+        current_spot_price = prices[current_hour_index % len(prices)]
+        
+        # Log stats to CSV
+        csv_writer.writerow([
+            datetime.now().isoformat(),
+            step_counter,
+            kelvin_to_celsius(current_temperature_k),
+            ambient_temp_c,
+            prediction.action.name,
+            watts_on,
+            current_spot_price,
+            controller.theta[0],
+            controller.theta[1],
+            kelvin_to_celsius(prediction.predicted_temperature),
+            prediction.predicted_power
+        ])
+
         if prediction.action == Action.ON:
             smart_plug_service.turn_on()
             watts_on = smart_plug_service.get_status().power_watts
         else:
             smart_plug_service.turn_off()
+        
+        print("--------------------------------")
+        print(f"Step {step_counter}: {prediction.action.name}, {current_temperature_k}, {ambient_temp_c}, {current_spot_price}, {controller.theta[0]}, {controller.theta[1]}, {prediction.predicted_temperature}, {prediction.predicted_power}")
+        print(f"Thermometer service temperature: {thermometer_service.get_current_temperature()}")
+        print(f"Controller service temperature: {controller.theta[0]}, {controller.theta[1]}")
+        print(f"Controller service predicted temperature: {prediction.predicted_temperature}")
+        print(f"Controller service predicted power: {prediction.predicted_power}")
+        print(f"Controller service action: {prediction.action.name}")
+        print(f"Controller service watts on: {watts_on}")
+        print(f"Controller service spot price: {current_spot_price}")
 
-        time.sleep(seconds_per_step)  # Wait 15 minutes between checks
+        time.sleep(seconds_per_step)  # Wait for next step
+        
+        # Update model with observed temperature change (for adaptive learning)
+        prev_temperature_k = current_temperature_k
+        current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
+        controller.update_model(prev_temperature_k, prediction.action, current_temperature_k)
+        
+        step_counter += 1
 
 
 def plot_results(results, config):
