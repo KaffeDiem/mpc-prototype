@@ -54,7 +54,8 @@ def main():
     csv_writer.writerow([
         'timestamp', 'step', 'current_temp_c', 'ambient_temp_c', 
         'action', 'watts_on', 'spot_price', 'heating_rate', 
-        'cooling_coeff', 'predicted_temp_c', 'predicted_power'
+        'cooling_coeff', 'predicted_temp_c', 'predicted_power',
+        'cost_dkk_per_step', 'cumulative_cost_dkk'
     ])
     
     print(f"Logging stats to {csv_filename}")
@@ -106,6 +107,7 @@ def main():
             logging.info(f"Initial measurement: {watts_on}W when ON")
 
     step_counter = 0
+    cumulative_cost_dkk = 0.0
 
     while True:
         spot_prices = np.repeat(prices, steps_per_hour)
@@ -123,6 +125,16 @@ def main():
         current_hour_index = step_counter // steps_per_hour
         current_spot_price = prices[current_hour_index % len(prices)]
         
+        # Calculate cost for this step
+        if prediction.action == Action.ON:
+            # Energy consumed = (watts / 1000) * (seconds_per_step / 3600) in kWh
+            energy_kwh = (watts_on / 1000.0) * (seconds_per_step / 3600.0)
+            cost_per_step = energy_kwh * current_spot_price
+        else:
+            cost_per_step = 0.0
+        
+        cumulative_cost_dkk += cost_per_step
+        
         # Log stats to CSV
         csv_writer.writerow([
             datetime.now().isoformat(),
@@ -135,7 +147,9 @@ def main():
             controller.theta[0],
             controller.theta[1],
             kelvin_to_celsius(prediction.predicted_temperature),
-            prediction.predicted_power
+            prediction.predicted_power,
+            cost_per_step,
+            cumulative_cost_dkk
         ])
 
         if prediction.action == Action.ON:
@@ -149,6 +163,8 @@ def main():
         print(f"Action taken: {prediction.action}")
         print(f"Current temperature: {kelvin_to_celsius(current_temperature_k)}")
         print(f"Ambient temperature: {ambient_temp_c}")
+        print(f"Cost this step: {cost_per_step:.4f} DKK")
+        print(f"Cumulative cost: {cumulative_cost_dkk:.2f} DKK")
 
         time.sleep(seconds_per_step)  # Wait for next step
         
