@@ -67,17 +67,18 @@ def main():
     smart_plug_service = SmartPlugService()
     thermometer_service = ThermometerService()
 
+    current_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
     thermal_system = ThermalSystemParams(
-        heating_rate_k_per_step=25,
-        cooling_coefficient=0.1,
-        ambient_temp_k=celsius_to_kelvin(20.0),
+        heating_rate_k_per_step=1.5,
+        cooling_coefficient=0.04,
+        ambient_temp_k=current_ambient_temp_k,
     )
     initial_measurements = ControllerServiceInitialMeasurements(
         thermal_system=thermal_system
     )
     config = ControllerServiceConfig(
-        temp_min=celsius_to_kelvin(45.0),
-        temp_max=celsius_to_kelvin(70.0),
+        temp_min=celsius_to_kelvin(20.0),
+        temp_max=celsius_to_kelvin(22.0),
         steps_per_hour=steps_per_hour
     )
     controller = ControllerService(initial_measurements=initial_measurements, config=config)
@@ -94,13 +95,11 @@ def main():
     time.sleep(3)
     watts_on = smart_plug_service.get_status().power_watts
 
-    current_temperature_k = celsius_to_kelvin(50.0)  # Initial temperature guess
-    
     step_counter = 0
 
     while True:
         spot_prices = np.repeat(prices, steps_per_hour)
-        current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
+        current_temperature_k = celsius_to_kelvin(smart_plug_service.get_status().temperature_c)
         ambient_temp_c = weather_service.get_current_temperature()
 
         prediction = controller.get_next_action(
@@ -136,14 +135,10 @@ def main():
             smart_plug_service.turn_off()
         
         print("--------------------------------")
-        print(f"Step {step_counter}: {prediction.action.name}, {current_temperature_k}, {ambient_temp_c}, {current_spot_price}, {controller.theta[0]}, {controller.theta[1]}, {prediction.predicted_temperature}, {prediction.predicted_power}")
-        print(f"Thermometer service temperature: {thermometer_service.get_current_temperature()}")
-        print(f"Controller service temperature: {controller.theta[0]}, {controller.theta[1]}")
-        print(f"Controller service predicted temperature: {prediction.predicted_temperature}")
-        print(f"Controller service predicted power: {prediction.predicted_power}")
-        print(f"Controller service action: {prediction.action.name}")
-        print(f"Controller service watts on: {watts_on}")
-        print(f"Controller service spot price: {current_spot_price}")
+        print(f"Step {step_counter}:")
+        print(f"Action taken: {prediction.action}")
+        print(f"Current temperature: {current_temperature_k}")
+        print(f"Ambient temperature: {ambient_temp_c}")
 
         time.sleep(seconds_per_step)  # Wait for next step
         
