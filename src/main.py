@@ -40,7 +40,7 @@ def main():
     # Register signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     
-    steps_per_hour = 12  # 5-minute intervals
+    steps_per_hour = 4  # E.g. 4 == 15-minute intervals
     seconds_per_step = 3600 / steps_per_hour
     start_time = time.time()
     
@@ -130,8 +130,11 @@ def main():
             # Energy consumed = (watts / 1000) * (seconds_per_step / 3600) in kWh
             energy_kwh = (watts_on / 1000.0) * (seconds_per_step / 3600.0)
             cost_per_step = energy_kwh * current_spot_price
+            smart_plug_service.turn_on()
+            watts_on = smart_plug_service.get_status().power_watts
         else:
             cost_per_step = 0.0
+            smart_plug_service.turn_off()
         
         cumulative_cost_dkk += cost_per_step
         
@@ -152,12 +155,6 @@ def main():
             cumulative_cost_dkk
         ])
 
-        if prediction.action == Action.ON:
-            smart_plug_service.turn_on()
-            watts_on = smart_plug_service.get_status().power_watts
-        else:
-            smart_plug_service.turn_off()
-        
         print("--------------------------------")
         print(f"Step {step_counter}:")
         print(f"Action taken: {prediction.action}")
