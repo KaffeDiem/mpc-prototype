@@ -8,10 +8,7 @@ import numpy as np
 
 @dataclass
 class PredictorInitialMeasurements:
-    temperature: float  # in Kelvin
-    power: float  # in Watts
     ua: float = 3.0  # Overall heat transfer coefficient in W/Km2
-    ambient_temp: float = 293.15  # in Kelvin (20°C)
 
 
 @dataclass
@@ -40,14 +37,15 @@ class Predictor:
         initial_measurements: PredictorInitialMeasurements,
         config: PredictorConfig,
     ):
-        self.temperature = initial_measurements.temperature
-        self.power = initial_measurements.power
         self.ua = initial_measurements.ua
-        self.ambient_temp = initial_measurements.ambient_temp
         self.config = config
 
     def get_next_action(
-        self, current_temp: float, future_prices: list[float]
+        self,
+        current_temp: float,
+        future_prices: list[float],
+        ambient_temp: float,
+        watts_on: float,
     ) -> PredictorResult:
         """
         Determine the next action (ON/OFF) for the system
@@ -61,23 +59,33 @@ class Predictor:
                 Action.OFF, current_temp - 5, 0, [Action.OFF]
             )  # Example values
         else:
-            result = self._minimize_cost(future_prices)
+            result = self._minimize_cost(
+                future_prices, ambient_temp, watts_on, current_temp
+            )
             return result
 
-    def _minimize_cost(self, future_prices: list[float]) -> PredictorResult:
+    def _minimize_cost(
+        self,
+        future_prices: list[float],
+        ambient_temp: float,
+        watts_on: float,
+        current_temp: float,
+    ) -> PredictorResult:
         """
         Optimize the action sequence to minimize cost over the prediction horizon.
         """
 
         def objective(actions: np.ndarray) -> float:
             sequence_price = self._price_for_sequence(
-                future_prices, [Action.ON if a >= 0.5 else Action.OFF for a in actions]
+                future_prices=future_prices,
+                sequence=[Action.ON if a >= 0.5 else Action.OFF for a in actions],
+                watts_on=watts_on,
             )
 
             outside_comfort_penalty = 0.0
             if (
-                self.temperature > self.config.temp_max
-                or self.temperature < self.config.temp_min
+                current_temp > self.config.temp_max
+                or current_temp < self.config.temp_min
             ):
                 outside_comfort_penalty = (
                     100.0  # Penalty for being outside comfort zone
@@ -102,29 +110,30 @@ class Predictor:
         return PredictorResult(
             actions[0],
             self._predict_future_temperature(
-                actions[0], ambient_temp=celsius_to_kelvin(15), power_on=1500
+                actions[0],
+                ambient_temp=celsius_to_kelvin(15),
+                watts_on=1500,
+                current_temp=current_temp,
             ),
-            self.power,
+            watts_on,
             actions,
         )
 
     def _predict_future_temperature(
-        self, action: Action, ambient_temp: float, power_on: float
+        self, action: Action, ambient_temp: float, watts_on: float, current_temp: float
     ) -> float:
         """
         Predict future temperature based on chosen action (ON/OFF).
         This is done using a simple thermal model with the UA value, ambient temperature, and current power.
         """
 
-        power = power_on if action == Action.ON else 0
+        power = watts_on if action == Action.ON else 0
 
         # Simple thermal model: T_next = T_current + (Power - UA * (T_current - T_ambient)) * dt / C
         dt = 1  # time step in hours
         C = 4_184  # thermal capacity in J/K (water)
-        delta_temp = (
-            (power - self.ua * (self.temperature - ambient_temp)) * dt * 3600 / C
-        )
-        return self.temperature + delta_temp
+        delta_temp = (power - self.ua * (current_temp - ambient_temp)) * dt * 3600 / C
+        return current_temp + delta_temp
 
     def plot(self, save_path: str):
         # Implement plotting logic for visualizing predictions
@@ -134,13 +143,11 @@ class Predictor:
         self,
         future_prices: list[float],
         sequence: list[Action],
-        watts: float | None = None,
+        watts_on: float,
     ) -> float:
         """
         Get the price for the next hour from the future prices list.
         """
-        if watts is None:
-            watts = self.power
 
         # Sequence may include fractional hours (e.g. 30 steps per hour meaning 2 minutes per step)
         total_cost = 0.0
@@ -153,7 +160,7 @@ class Predictor:
                 price = future_prices[hour]
                 action = sequence[index] if index < len(sequence) else Action.OFF
                 if action == Action.ON:
-                    total_cost += (watts / 1000) * price / steps_per_hour
+                    total_cost += (watts_on / 1000) * price / steps_per_hour
             index += 1
 
         return total_cost
