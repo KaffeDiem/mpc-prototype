@@ -2,6 +2,7 @@ from typing import Any
 from dataclasses import dataclass
 from enum import Enum
 from scipy.optimize import minimize
+import matplotlib.pyplot as plt
 
 
 @dataclass
@@ -62,11 +63,25 @@ class Predictor:
         Optimize the action sequence to minimize cost over the prediction horizon.
         """
 
-        def cost_function(actions: list[int]) -> float:
-            # Calculate cost based on expected power consumption and prices
-            return 0.0
+        def objective(actions: list[int]) -> float:
+            sequence_price = self._price_for_sequence(
+                future_prices, [Action.ON if a >= 0.5 else Action.OFF for a in actions]
+            )
 
-        return PredictorResult(Action.OFF, self.temperature, self.power)  # Placeholder
+            outside_comfort_penalty = 0.0
+            if self.temperature > self.config.temp_max or self.temperature < self.config.temp_min:
+                outside_comfort_penalty = 100.0  # Penalty for being outside comfort zone
+
+            return sequence_price + outside_comfort_penalty
+
+        result = minimize(
+            fun=objective,
+            x0=[0] * len(future_prices),
+            bounds=[(0, 1)] * len(future_prices),
+        )
+
+        action = Action.ON if result.x[0] >= 0.5 else Action.OFF
+        return PredictorResult(action, self._predict_future_temperature(action), self.power)
 
     def _predict_future_temperature(self, action: Action) -> float:
         """
@@ -91,7 +106,10 @@ class Predictor:
         pass
 
     def _price_for_sequence(
-        self, future_prices: list[float], sequence: list[Action], watts: float | None = None
+        self,
+        future_prices: list[float],
+        sequence: list[Action],
+        watts: float | None = None,
     ) -> float:
         """
         Get the price for the next hour from the future prices list.
@@ -114,3 +132,9 @@ class Predictor:
             index += 1
 
         return total_cost
+
+    def celsius_to_kelvin(self, celsius: float) -> float:
+        return celsius + 273.15
+
+    def kelvin_to_celsius(self, kelvin: float) -> float:
+        return kelvin - 273.15
