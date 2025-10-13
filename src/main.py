@@ -3,11 +3,11 @@
 from datetime import date, timedelta
 import logging
 from prices_service import PricesService
-from predictor import (
-    Predictor,
-    PredictorInitialMeasurements,
+from controller_service import (
+    ControllerService,
+    ControllerServiceInitialMeasurements,
     ThermalSystemParams,
-    PredictorConfig,
+    ControllerServiceConfig,
     Action
 )
 import numpy as np
@@ -52,19 +52,19 @@ def main():
 
     cum_cost = 0.0
 
-    # Initialize predictor with initial parameter guesstimates (intentionally slightly wrong)
+    # Initialize controller_service with initial parameter guesstimates (intentionally slightly wrong)
     thermal_system = ThermalSystemParams.water_heater(
         heating_rate_k_per_step=1.5,  # Initial guess (true is 1.5)
         cooling_coefficient=0.015,     # Initial guess (true might be 0.02)
         ambient_temp_celsius=20.0
     )
-    config = PredictorConfig(
+    config = ControllerServiceConfig(
         temp_min=318.15,  # 45°C
         temp_max=333.15,  # 60°C - more realistic max for water heater
         steps_per_hour=timesteps_per_hour
     )
-    predictor = Predictor(
-        PredictorInitialMeasurements(thermal_system=thermal_system),
+    controller_service = ControllerService(
+        ControllerServiceInitialMeasurements(thermal_system=thermal_system),
         config=config
     )
 
@@ -77,8 +77,8 @@ def main():
         # Get remaining prices for optimization horizon
         remaining_prices = spot_prices[t:].tolist()
 
-        # Get next action from predictor
-        pred_result = predictor.get_next_action(
+        # Get next action from controller_service
+        pred_result = controller_service.get_next_action(
             current_temp=T_current,
             future_prices=remaining_prices,
             ambient_temp=thermal_system.ambient_temp_k,
@@ -99,8 +99,8 @@ def main():
         # Add small measurement noise
         T_measured = T_next + np.random.normal(0, 0.1)
 
-        # Update predictor's model (adaptive learning with RLS)
-        predictor.update_model(T_current, pred_result.action, T_measured)
+        # Update controller_service's model (adaptive learning with RLS)
+        controller_service.update_model(T_current, pred_result.action, T_measured)
 
         # Calculate costs
         timestep_hours = 1.0 / timesteps_per_hour  # Dynamic based on configuration
@@ -115,8 +115,8 @@ def main():
         results["heater_on"].append(heater_on)
         results["spot_price"].append(spot_prices[t])
         results["electricity_cost"].append(cost)
-        results["heating_rate"].append(predictor.theta[0])
-        results["cooling_coeff"].append(predictor.theta[1])
+        results["heating_rate"].append(controller_service.theta[0])
+        results["cooling_coeff"].append(controller_service.theta[1])
 
         # Progress update
         if t % (timesteps_per_hour * 2) == 0:  # Every 2 hours
@@ -124,7 +124,7 @@ def main():
                 f"Hour {current_hour:2d}: T={T_measured-273.15:.1f}°C, "
                 f"Heater={'ON' if heater_on else 'OFF'}, "
                 f"Cost={cum_cost:.2f} DKK, "
-                f"Learned: h={predictor.theta[0]:.3f}, c={predictor.theta[1]:.4f}"
+                f"Learned: h={controller_service.theta[0]:.3f}, c={controller_service.theta[1]:.4f}"
             )
 
         T_current = T_measured
@@ -135,7 +135,7 @@ def main():
     temp_max_c = config.temp_max - 273.15
 
     print(f"\n{'='*60}")
-    print(f"SIMULATION RESULTS - Adaptive Predictor with RLS")
+    print(f"SIMULATION RESULTS - Adaptive Controller Service with RLS")
     print(f"{'='*60}")
     print(f"Total electricity cost: {cum_cost:.2f} DKK")
     print(f"\nTemperature Statistics:")
@@ -149,10 +149,10 @@ def main():
     print(f"  Total energy: {cum_cost / np.mean(results['spot_price']):.2f} kWh")
     print(f"\nAdaptive Learning:")
     print(f"  Initial heating rate: 0.3 K/step")
-    print(f"  Final heating rate: {predictor.theta[0]:.3f} K/step (true: 0.5)")
+    print(f"  Final heating rate: {controller_service.theta[0]:.3f} K/step (true: 0.5)")
     print(f"  Initial cooling coeff: 0.015")
-    print(f"  Final cooling coeff: {predictor.theta[1]:.4f} (true: 0.02)")
-    print(f"  Mean prediction error: {np.mean(np.abs(predictor.prediction_errors)):.3f} K")
+    print(f"  Final cooling coeff: {controller_service.theta[1]:.4f} (true: 0.02)")
+    print(f"  Mean prediction error: {np.mean(np.abs(controller_service.prediction_errors)):.3f} K")
     print(f"{'='*60}\n")
     print("Simulation complete. Plotting results...")
 
@@ -174,7 +174,7 @@ def plot_results(results, config):
     axes[0].axhline(min_celsius, color="r", linestyle="--", label="Min")
     axes[0].axhline(max_celsius, color="r", linestyle="--", label="Max")
     axes[0].set_ylabel("Temperature (°C)")
-    axes[0].set_title("Adaptive Predictor with RLS - 24h Simulation")
+    axes[0].set_title("Adaptive Controller Service with RLS - 24h Simulation")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
@@ -208,8 +208,8 @@ def plot_results(results, config):
     axes[4].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig("adaptive_predictor_results.png")
-    print("Plot saved to adaptive_predictor_results.png")
+    plt.savefig("adaptive_controller_service_results.png")
+    print("Plot saved to adaptive_controller_service_results.png")
 
 
 if __name__ == "__main__":

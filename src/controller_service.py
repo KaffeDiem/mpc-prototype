@@ -55,12 +55,12 @@ class ThermalSystemParams:
 
 
 @dataclass
-class PredictorInitialMeasurements:
+class ControllerServiceInitialMeasurements:
     thermal_system: ThermalSystemParams
 
 
 @dataclass
-class PredictorConfig:
+class ControllerServiceConfig:
     temp_min: float = 323.15  # in Kelvin (50°C)
     temp_max: float = 343.15  # in Kelvin (70°C)
     steps_per_hour: int = 30
@@ -72,18 +72,18 @@ class Action(Enum):
 
 
 @dataclass
-class PredictorResult:
+class ControllerServiceResult:
     action: Action
     predicted_temperature: float
     predicted_power: float
     trajectory: list[Action]
 
 
-class Predictor:
+class ControllerService:
     def __init__(
         self,
-        initial_measurements: PredictorInitialMeasurements,
-        config: PredictorConfig,
+        initial_measurements: ControllerServiceInitialMeasurements,
+        config: ControllerServiceConfig,
     ):
         self.thermal_system = initial_measurements.thermal_system
         self.config = config
@@ -115,16 +115,16 @@ class Predictor:
         future_prices: list[float],
         ambient_temp: float,
         watts_on: float,
-    ) -> PredictorResult:
+    ) -> ControllerServiceResult:
         """
         Determine the next action (ON/OFF) for the system
         """
         if current_temp < self.config.temp_min:
-            return PredictorResult(
+            return ControllerServiceResult(
                 Action.ON, current_temp + 5, 100, [Action.ON]
             )  # Example values
         elif current_temp > self.config.temp_max:
-            return PredictorResult(
+            return ControllerServiceResult(
                 Action.OFF, current_temp - 5, 0, [Action.OFF]
             )  # Example values
         else:
@@ -139,7 +139,7 @@ class Predictor:
         ambient_temp: float,
         watts_on: float,
         current_temp: float,
-    ) -> PredictorResult:
+    ) -> ControllerServiceResult:
         """
         Optimize the action sequence to minimize cost over the prediction horizon.
         Now properly simulates temperature trajectory and enforces constraints.
@@ -201,7 +201,7 @@ class Predictor:
 
         actions = [Action.ON if a >= 0.5 else Action.OFF for a in result.x]
 
-        return PredictorResult(
+        return ControllerServiceResult(
             actions[0],
             self._predict_future_temperature(actions[0], current_temp),
             watts_on,
