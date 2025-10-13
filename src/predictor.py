@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 @dataclass
@@ -30,6 +31,7 @@ class PredictorResult:
     action: Action
     predicted_temperature: float
     predicted_power: float
+    trajectory: list[Action]
 
 
 class Predictor:
@@ -48,40 +50,57 @@ class Predictor:
         self, current_temp: float, future_prices: list[float]
     ) -> PredictorResult:
         """
-        Decide next action based on current temperature, ambient temperature, and future prices.
+        Determine the next action (ON/OFF) for the system
         """
         if current_temp < self.config.temp_min:
-            return PredictorResult(Action.ON, current_temp + 5, 100)  # Example values
+            return PredictorResult(
+                Action.ON, current_temp + 5, 100, [Action.ON]
+            )  # Example values
         elif current_temp > self.config.temp_max:
-            return PredictorResult(Action.OFF, current_temp - 5, 0)  # Example values
+            return PredictorResult(
+                Action.OFF, current_temp - 5, 0, [Action.OFF]
+            )  # Example values
         else:
             result = self._minimize_cost(future_prices)
             return result
-
     def _minimize_cost(self, future_prices: list[float]) -> PredictorResult:
         """
         Optimize the action sequence to minimize cost over the prediction horizon.
         """
 
-        def objective(actions: list[int]) -> float:
+        def objective(actions: np.ndarray) -> float:
             sequence_price = self._price_for_sequence(
                 future_prices, [Action.ON if a >= 0.5 else Action.OFF for a in actions]
             )
 
             outside_comfort_penalty = 0.0
-            if self.temperature > self.config.temp_max or self.temperature < self.config.temp_min:
-                outside_comfort_penalty = 100.0  # Penalty for being outside comfort zone
+            if (
+                self.temperature > self.config.temp_max
+                or self.temperature < self.config.temp_min
+            ):
+                outside_comfort_penalty = (
+                    100.0  # Penalty for being outside comfort zone
+                )
 
-            return sequence_price + outside_comfort_penalty
+            total = sequence_price + outside_comfort_penalty
+            print(f"-- Minimization step --")
+            print(
+                f"Sequence price: {sequence_price}, Outside comfort penalty: {outside_comfort_penalty}, Total: {total}"
+            )
+            print("Minimizing with actions:", actions)
+            return total
 
         result = minimize(
             fun=objective,
-            x0=[0] * len(future_prices),
+            x0=[0.0] * len(future_prices),
             bounds=[(0, 1)] * len(future_prices),
         )
 
-        action = Action.ON if result.x[0] >= 0.5 else Action.OFF
-        return PredictorResult(action, self._predict_future_temperature(action), self.power)
+        actions = [Action.ON if a >= 0.5 else Action.OFF for a in result.x]
+
+        return PredictorResult(
+            actions[0], self._predict_future_temperature(actions[0]), self.power, actions
+        )
 
     def _predict_future_temperature(self, action: Action) -> float:
         """
@@ -133,8 +152,10 @@ class Predictor:
 
         return total_cost
 
-    def celsius_to_kelvin(self, celsius: float) -> float:
-        return celsius + 273.15
 
-    def kelvin_to_celsius(self, kelvin: float) -> float:
-        return kelvin - 273.15
+def celsius_to_kelvin(celsius: float) -> float:
+    return celsius + 273.15
+
+
+def kelvin_to_celsius(kelvin: float) -> float:
+    return kelvin - 273.15
