@@ -1,11 +1,12 @@
 """Simple example usage of the PricesService to fetch Danish electricity prices."""
 
 from datetime import date, timedelta
-from time import time
+import time
 import logging
 from prices_service import PricesService
 from weather_service import WeatherService
 from smart_plug_service import SmartPlugService
+from thermometer_service import ThermometerService
 from controller_service import *
 from simulator import Simulator
 import numpy as np
@@ -20,13 +21,14 @@ logging.basicConfig(
 def main():
     steps_per_hour = 12  # 5-minute intervals
     seconds_per_step = 3600 / steps_per_hour
-    start_time = time()
+    start_time = time.time()
 
     # Initialize service for DK2 region (Copenhagen/East of Great Belt)
     # Use "DK1" for Aarhus/West of Great Belt
     price_service = PricesService(region="DK2")
     weather_service = WeatherService()
     smart_plug_service = SmartPlugService()
+    thermometer_service = ThermometerService()
 
     thermal_system = ThermalSystemParams(
         heating_rate_k_per_step=25,
@@ -50,24 +52,29 @@ def main():
     prices = price_service.get_prices(today, tomorrow)
     prices = [p.price for p in prices]  # Extract just the price values
 
+    # Perform initial measurements. Flip on for a few seconds to measure the initial watts when on.
+    smart_plug_service.turn_on()
+    time.sleep(3)
+    watts_on = smart_plug_service.get_status().power_watts
+
     current_temperature_k = celsius_to_kelvin(50.0)  # Initial temperature guess
-    prev_temp_k = current_temperature_k
-    watts_on = 0.0
+    prev_temperature_k = current_temperature_k
+
     while True:
         spot_prices = np.repeat(prices, steps_per_hour)
-        # TODO: Read current temperature from sensor
-
+        current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
         ambient_temp_c = weather_service.get_current_temperature()
 
         prediction = controller.get_next_action(
             current_temp=current_temperature_k,
             future_prices=spot_prices.tolist(),
             ambient_temp=celsius_to_kelvin(ambient_temp_c),
-            watts_on=1500.0
+            watts_on=watts_on
         )
 
         if prediction.action == Action.ON:
             smart_plug_service.turn_on()
+            watts_on = smart_plug_service.get_status().power_watts
         else:
             smart_plug_service.turn_off()
 
