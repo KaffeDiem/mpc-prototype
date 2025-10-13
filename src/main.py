@@ -84,13 +84,6 @@ def main():
     )
     controller = ControllerService(initial_measurements=initial_measurements, config=config)
 
-    # Get today's and tomorrow's prices
-    today = date.today()
-    tomorrow = today + timedelta(days=1)
-
-    prices = price_service.get_prices(today, tomorrow)
-    prices = [p.price for p in prices]  # Extract just the price values
-
     # Perform initial measurements. Flip on for a few seconds to measure the initial watts when on.
     logging.info("Performing initial measurements...")
     turn_on_success = smart_plug_service.turn_on()
@@ -108,8 +101,32 @@ def main():
 
     step_counter = 0
     cumulative_cost_dkk = 0.0
+    
+    # Initialize prices and track when they were last fetched
+    prices = []
+    last_price_fetch_time = 0  # Force initial fetch
 
     while True:
+        # Fetch prices every hour (3600 seconds)
+        current_time = time.time()
+        if current_time - last_price_fetch_time >= 3600:
+            print("Fetching updated electricity prices...")
+            today = date.today()
+            tomorrow = today + timedelta(days=1)
+            try:
+                prices = price_service.get_prices(today, tomorrow)
+                prices = [p.price for p in prices]  # Extract just the price values
+                last_price_fetch_time = current_time
+                print(f"Fetched {len(prices)} hourly prices")
+            except Exception as e:
+                logging.error(f"Failed to fetch prices: {e}")
+                if not prices:  # If we have no prices at all, use a default
+                    prices = [1.0] * 48  # Default fallback
+                    print("Using default prices due to fetch failure")
+        
+        if not prices:  # Safety check
+            continue
+
         spot_prices = np.repeat(prices, steps_per_hour)
         current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
         ambient_temp_c = weather_service.get_current_temperature()
@@ -157,7 +174,7 @@ def main():
 
         print("--------------------------------")
         print(f"Step {step_counter}:")
-        print(f"Action taken: {prediction.action}")
+        print(f"Next action: {prediction.action}")
         print(f"Current temperature: {kelvin_to_celsius(current_temperature_k)}")
         print(f"Ambient temperature: {ambient_temp_c}")
         print(f"Cost this step: {cost_per_step:.4f} DKK")
