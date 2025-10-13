@@ -121,12 +121,12 @@ class ControllerService:
         """
         if current_temp <= self.config.temp_min:
             return ControllerServiceResult(
-                Action.ON, current_temp + 5, 100, [Action.ON]
-            )  # Example values
+                Action.ON, current_temp + 5, watts_on, [Action.ON]
+            )
         elif current_temp > self.config.temp_max:
             return ControllerServiceResult(
-                Action.OFF, current_temp - 5, 0, [Action.OFF]
-            )  # Example values
+                Action.OFF, current_temp - 5, 0.0, [Action.OFF]
+            )
         else:
             result = self._minimize_cost(
                 future_prices, ambient_temp, watts_on, current_temp
@@ -202,7 +202,7 @@ class ControllerService:
         return ControllerServiceResult(
             actions[0],
             self._predict_future_temperature(actions[0], current_temp, ambient_temp),
-            watts_on,
+            watts_on if actions[0] == Action.ON else 0.0,
             actions,
         )
 
