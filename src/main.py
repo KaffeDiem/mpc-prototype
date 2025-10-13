@@ -6,46 +6,172 @@ import logging
 import csv
 import signal
 import sys
-from prices_service import PricesService
+from typing import Tuple, Optional, TextIO, Any
+import numpy as np
+
+from prices_service import PricesService, Price, Region
 from weather_service import WeatherService
 from smart_plug_service import SmartPlugService
 from thermometer_service import ThermometerService
-from controller_service import *
-from simulator import Simulator
-import numpy as np
-import matplotlib.pyplot as plt
+from controller_service import (
+    Action,
+    celsius_to_kelvin,
+    kelvin_to_celsius,
+    ThermalSystemParams,
+    ControllerServiceInitialMeasurements,
+    ControllerServiceConfig,
+    ControllerService,
+)
 
 # Set up logging to see any warnings about missing dates
 logging.basicConfig(
     level=logging.WARNING, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-# Global variables for signal handler
-csv_file = None
-csv_filename = None
+
+# ============================================================================
+# Service Initialization Functions
+# ============================================================================
+
+def initialize_services(region: Region) -> Tuple[PricesService, WeatherService, SmartPlugService, ThermometerService]:
+    """Initialize all required services."""
+    price_service = PricesService(region=region)
+    weather_service = WeatherService()
+    smart_plug_service = SmartPlugService()
+    thermometer_service = ThermometerService()
+    return price_service, weather_service, smart_plug_service, thermometer_service
 
 
-def signal_handler(sig, frame):
-    """Handle Ctrl+C gracefully"""
-    print(f"\n\nShutting down gracefully...")
-    if csv_file:
-        csv_file.close()
-        print(f"Stats saved to {csv_filename}")
-    sys.exit(0)
+def initialize_controller(
+    weather_service: WeatherService,
+    steps_per_hour: int,
+    temp_min_celsius: float,
+    temp_max_celsius: float
+) -> ControllerService:
+    """Initialize the controller with thermal system parameters and config."""
+    current_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
+    thermal_system = ThermalSystemParams(
+        heating_rate_k_per_step=1.5,
+        cooling_coefficient=0.04,
+        ambient_temp_k=current_ambient_temp_k,
+    )
+    initial_measurements = ControllerServiceInitialMeasurements(thermal_system=thermal_system)
+    config = ControllerServiceConfig(
+        temp_min=celsius_to_kelvin(temp_min_celsius),
+        temp_max=celsius_to_kelvin(temp_max_celsius),
+        steps_per_hour=steps_per_hour
+    )
+    return ControllerService(initial_measurements=initial_measurements, config=config)
 
 
-def main():
-    global csv_file, csv_filename
+def perform_initial_measurements(smart_plug_service: SmartPlugService) -> float:
+    """
+    Perform initial measurements to determine watts when on.
+    Returns the measured watts value or a default fallback.
+    """
+    logging.info("Performing initial measurements...")
+    turn_on_success = smart_plug_service.turn_on()
+    if not turn_on_success:
+        logging.warning("Failed to turn on plug during initialization. Using default watts value.")
+        return 1000.0  # Default fallback value
     
-    # Register signal handler for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
+    time.sleep(3)
+    watts_on = smart_plug_service.get_status().power_watts
+    if watts_on == 0.0:
+        logging.warning("Got 0W reading during initialization. Using default watts value.")
+        return 1000.0  # Default fallback value
     
-    steps_per_hour = 4  # E.g. 4 == 15-minute intervals
-    seconds_per_step = 3600 / steps_per_hour
-    start_time = time.time()
+    logging.info(f"Initial measurement: {watts_on}W when ON")
+    return watts_on
+
+
+# ============================================================================
+# Price Management Functions
+# ============================================================================
+
+def should_refetch_prices(
+    last_fetch_time: float,
+    prices: list[Price],
+    min_future_hours: int
+) -> bool:
+    """Determine if prices should be refetched."""
+    current_time = time.time()
+    now = datetime.now()
     
-    # Create CSV file with timestamp
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    # Filter to get only future prices
+    future_prices = [p for p in prices if p.date >= now.replace(minute=0, second=0, microsecond=0)]
+    
+    # Refetch if it's been an hour, or if we have fewer than min_future_hours of future prices
+    return (current_time - last_fetch_time >= 3600) or (len(future_prices) < min_future_hours)
+
+
+def fetch_prices(
+    price_service: PricesService,
+    today: date,
+    tomorrow: date
+) -> list[Price]:
+    """
+    Fetch prices with error handling.
+    Returns a list of Price objects, or default prices on failure.
+    """
+    try:
+        prices = price_service.get_prices(today, tomorrow)
+        print(f"Fetched {len(prices)} hourly prices")
+        return prices
+    except Exception as e:
+        logging.error(f"Failed to fetch prices: {e}")
+        # Create default Price objects for the next 48 hours
+        now = datetime.now()
+        default_prices = [Price(date=now + timedelta(hours=i), price=1.0) for i in range(48)]
+        print("Using default prices due to fetch failure")
+        return default_prices
+
+
+def get_current_spot_price(prices: list[Price]) -> float:
+    """
+    Get the current spot price by filtering out all prices before the current hour.
+    Returns the first remaining price, or 1.0 as a default.
+    """
+    now = datetime.now()
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+    
+    # Filter out prices before current hour
+    remaining_prices = [p for p in prices if p.date >= current_hour]
+    
+    if remaining_prices:
+        return remaining_prices[0].price
+    else:
+        logging.warning("No prices available for current or future hours, using default")
+        return 1.0
+
+
+def prepare_future_prices(prices: list[Price], steps_per_hour: int) -> list[float]:
+    """
+    Filter future prices and expand them to match the steps per hour.
+    Returns a list of price values repeated for each step.
+    """
+    now = datetime.now()
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+    
+    # Filter to get only future prices
+    future_prices = [p for p in prices if p.date >= current_hour]
+    
+    # Extract just the price values and repeat per step
+    future_price_values = [p.price for p in future_prices]
+    spot_prices = np.repeat(future_price_values, steps_per_hour)
+    
+    return spot_prices.tolist()
+
+
+# ============================================================================
+# CSV Logging Functions
+# ============================================================================
+
+def setup_csv_file(timestamp: str) -> Tuple[TextIO, Any, str]:
+    """
+    Setup CSV file for logging statistics.
+    Returns tuple of (file_handle, csv_writer, filename).
+    """
     csv_filename = f"stats_{timestamp}.csv"
     csv_file = open(csv_filename, 'w', newline='', buffering=1)
     csv_writer = csv.writer(csv_file)
@@ -58,129 +184,216 @@ def main():
         'cost_dkk_per_step', 'cumulative_cost_dkk'
     ])
     
+    return csv_file, csv_writer, csv_filename
+
+
+def log_step_to_csv(
+    csv_writer: Any,
+    step_counter: int,
+    current_temperature_k: float,
+    ambient_temp_c: float,
+    action: Action,
+    watts_on: float,
+    current_spot_price: float,
+    heating_rate: float,
+    cooling_coeff: float,
+    predicted_temperature_k: float,
+    predicted_power: float,
+    cost_per_step: float,
+    cumulative_cost_dkk: float
+) -> None:
+    """Log a single step's data to CSV."""
+    csv_writer.writerow([
+        datetime.now().isoformat(),
+        step_counter,
+        kelvin_to_celsius(current_temperature_k),
+        ambient_temp_c,
+        action.name,
+        watts_on,
+        current_spot_price,
+        heating_rate,
+        cooling_coeff,
+        kelvin_to_celsius(predicted_temperature_k),
+        predicted_power,
+        cost_per_step,
+        cumulative_cost_dkk
+    ])
+
+
+# ============================================================================
+# Control Logic Functions
+# ============================================================================
+
+def calculate_step_cost(
+    action: Action,
+    watts_on: float,
+    spot_price: float,
+    seconds_per_step: float
+) -> float:
+    """
+    Calculate the cost in DKK for a single step.
+    Energy consumed = (watts / 1000) * (seconds_per_step / 3600) in kWh
+    """
+    if action == Action.ON:
+        energy_kwh = (watts_on / 1000.0) * (seconds_per_step / 3600.0)
+        return energy_kwh * spot_price
+    return 0.0
+
+
+def execute_action_and_update_watts(
+    action: Action,
+    smart_plug_service: SmartPlugService
+) -> float:
+    """
+    Execute the action on the smart plug and return the updated watts reading.
+    """
+    if action == Action.ON:
+        smart_plug_service.turn_on()
+        return smart_plug_service.get_status().power_watts
+    else:
+        smart_plug_service.turn_off()
+        return 0.0
+
+
+def print_step_info(
+    step_counter: int,
+    action: Action,
+    current_temp_celsius: float,
+    ambient_temp_celsius: float,
+    cost_per_step: float,
+    cumulative_cost_dkk: float
+) -> None:
+    """Print formatted information about the current step."""
+    print("--------------------------------")
+    print(f"Step {step_counter}:")
+    print(f"Next action: {action}")
+    print(f"Current temperature: {current_temp_celsius}")
+    print(f"Ambient temperature: {ambient_temp_celsius}")
+    print(f"Cost this step: {cost_per_step:.4f} DKK")
+    print(f"Cumulative cost: {cumulative_cost_dkk:.2f} DKK")
+
+
+# ============================================================================
+# Main Function
+# ============================================================================
+
+def main():
+    """Main control loop for temperature management system."""
+    # Configuration
+    steps_per_hour = 4  # E.g. 4 == 15-minute intervals
+    seconds_per_step = 3600 / steps_per_hour
+    MIN_FUTURE_HOURS = 12  # Refetch if we have less than this many hours of future prices
+    
+    # Setup CSV logging
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    csv_file, csv_writer, csv_filename = setup_csv_file(timestamp)
+    
+    # Setup signal handler for graceful shutdown using closure
+    def signal_handler(sig, frame):
+        """Handle Ctrl+C gracefully"""
+        print(f"\n\nShutting down gracefully...")
+        csv_file.close()
+        print(f"Stats saved to {csv_filename}")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
     print(f"Logging stats to {csv_filename}")
     print("Press Ctrl+C to stop...\n")
 
-    # Initialize service for DK2 region (Copenhagen/East of Great Belt)
+    # Initialize services for DK2 region (Copenhagen/East of Great Belt)
     # Use "DK1" for Aarhus/West of Great Belt
-    price_service = PricesService(region="DK2")
-    weather_service = WeatherService()
-    smart_plug_service = SmartPlugService()
-    thermometer_service = ThermometerService()
-
-    current_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
-    thermal_system = ThermalSystemParams(
-        heating_rate_k_per_step=1.5,
-        cooling_coefficient=0.04,
-        ambient_temp_k=current_ambient_temp_k,
+    price_service, weather_service, smart_plug_service, thermometer_service = initialize_services("DK2")
+    
+    # Initialize controller
+    controller = initialize_controller(
+        weather_service=weather_service,
+        steps_per_hour=steps_per_hour,
+        temp_min_celsius=20.0,
+        temp_max_celsius=22.0
     )
-    initial_measurements = ControllerServiceInitialMeasurements(
-        thermal_system=thermal_system
-    )
-    config = ControllerServiceConfig(
-        temp_min=celsius_to_kelvin(20.0),
-        temp_max=celsius_to_kelvin(22.0),
-        steps_per_hour=steps_per_hour
-    )
-    controller = ControllerService(initial_measurements=initial_measurements, config=config)
+    
+    # Perform initial measurements
+    watts_on = perform_initial_measurements(smart_plug_service)
 
-    # Perform initial measurements. Flip on for a few seconds to measure the initial watts when on.
-    logging.info("Performing initial measurements...")
-    turn_on_success = smart_plug_service.turn_on()
-    if not turn_on_success:
-        logging.warning("Failed to turn on plug during initialization. Using default watts value.")
-        watts_on = 1000.0  # Default fallback value
-    else:
-        time.sleep(3)
-        watts_on = smart_plug_service.get_status().power_watts
-        if watts_on == 0.0:
-            logging.warning("Got 0W reading during initialization. Using default watts value.")
-            watts_on = 1000.0  # Default fallback value
-        else:
-            logging.info(f"Initial measurement: {watts_on}W when ON")
-
+    # Initialize control loop state
     step_counter = 0
     cumulative_cost_dkk = 0.0
-    
-    # Initialize prices and track when they were last fetched
     prices = []
     last_price_fetch_time = 0  # Force initial fetch
 
+    # Main control loop
     while True:
-        # Fetch prices every hour (3600 seconds)
-        current_time = time.time()
-        if current_time - last_price_fetch_time >= 3600:
+        # Fetch prices if needed
+        if should_refetch_prices(last_price_fetch_time, prices, MIN_FUTURE_HOURS):
             print("Fetching updated electricity prices...")
             today = date.today()
             tomorrow = today + timedelta(days=1)
-            try:
-                prices = price_service.get_prices(today, tomorrow)
-                prices = [p.price for p in prices]  # Extract just the price values
-                last_price_fetch_time = current_time
-                print(f"Fetched {len(prices)} hourly prices")
-            except Exception as e:
-                logging.error(f"Failed to fetch prices: {e}")
-                if not prices:  # If we have no prices at all, use a default
-                    prices = [1.0] * 48  # Default fallback
-                    print("Using default prices due to fetch failure")
+            prices = fetch_prices(price_service, today, tomorrow)
+            last_price_fetch_time = time.time()
         
         if not prices:  # Safety check
+            logging.warning("No prices available, skipping this iteration")
+            time.sleep(seconds_per_step)
             continue
 
-        spot_prices = np.repeat(prices, steps_per_hour)
+        # Prepare data for controller
+        future_price_list = prepare_future_prices(prices, steps_per_hour)
         current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
         ambient_temp_c = weather_service.get_current_temperature()
 
+        # Get next action from controller
         prediction = controller.get_next_action(
             current_temp=current_temperature_k,
-            future_prices=spot_prices.tolist(),
+            future_prices=future_price_list,
             ambient_temp=celsius_to_kelvin(ambient_temp_c),
             watts_on=watts_on
         )
 
-        # Determine current spot price based on step counter
-        current_hour_index = step_counter // steps_per_hour
-        current_spot_price = prices[current_hour_index % len(prices)]
+        # Get current spot price
+        current_spot_price = get_current_spot_price(prices)
         
         # Calculate cost for this step
-        if prediction.action == Action.ON:
-            # Energy consumed = (watts / 1000) * (seconds_per_step / 3600) in kWh
-            energy_kwh = (watts_on / 1000.0) * (seconds_per_step / 3600.0)
-            cost_per_step = energy_kwh * current_spot_price
-            smart_plug_service.turn_on()
-            watts_on = smart_plug_service.get_status().power_watts
-        else:
-            cost_per_step = 0.0
-            smart_plug_service.turn_off()
-        
-        cumulative_cost_dkk += cost_per_step
-        
-        # Log stats to CSV
-        csv_writer.writerow([
-            datetime.now().isoformat(),
-            step_counter,
-            kelvin_to_celsius(current_temperature_k),
-            ambient_temp_c,
-            prediction.action.name,
+        cost_per_step = calculate_step_cost(
+            prediction.action,
             watts_on,
             current_spot_price,
-            controller.theta[0],
-            controller.theta[1],
-            kelvin_to_celsius(prediction.predicted_temperature),
-            prediction.predicted_power,
-            cost_per_step,
-            cumulative_cost_dkk
-        ])
+            seconds_per_step
+        )
+        cumulative_cost_dkk += cost_per_step
+        
+        # Execute action and update watts
+        watts_on = execute_action_and_update_watts(prediction.action, smart_plug_service)
+        
+        # Log stats to CSV
+        log_step_to_csv(
+            csv_writer=csv_writer,
+            step_counter=step_counter,
+            current_temperature_k=current_temperature_k,
+            ambient_temp_c=ambient_temp_c,
+            action=prediction.action,
+            watts_on=watts_on,
+            current_spot_price=current_spot_price,
+            heating_rate=controller.theta[0],
+            cooling_coeff=controller.theta[1],
+            predicted_temperature_k=prediction.predicted_temperature,
+            predicted_power=prediction.predicted_power,
+            cost_per_step=cost_per_step,
+            cumulative_cost_dkk=cumulative_cost_dkk
+        )
 
-        print("--------------------------------")
-        print(f"Step {step_counter}:")
-        print(f"Next action: {prediction.action}")
-        print(f"Current temperature: {kelvin_to_celsius(current_temperature_k)}")
-        print(f"Ambient temperature: {ambient_temp_c}")
-        print(f"Cost this step: {cost_per_step:.4f} DKK")
-        print(f"Cumulative cost: {cumulative_cost_dkk:.2f} DKK")
+        # Print step information
+        print_step_info(
+            step_counter=step_counter,
+            action=prediction.action,
+            current_temp_celsius=kelvin_to_celsius(current_temperature_k),
+            ambient_temp_celsius=ambient_temp_c,
+            cost_per_step=cost_per_step,
+            cumulative_cost_dkk=cumulative_cost_dkk
+        )
 
-        time.sleep(seconds_per_step)  # Wait for next step
+        # Wait for next step
+        time.sleep(seconds_per_step)
         
         # Update model with observed temperature change (for adaptive learning)
         prev_temperature_k = current_temperature_k
@@ -188,63 +401,6 @@ def main():
         controller.update_model(prev_temperature_k, prediction.action, current_temperature_k)
         
         step_counter += 1
-
-
-def plot_results(results, config):
-    """Create visualization of simulation results"""
-    fig, axes = plt.subplots(5, 1, figsize=(12, 12))
-
-    time = np.array(results["time"])
-
-    # Temperature - Convert from Kelvin to Celsius for display
-    temp_celsius = np.array(results["temperature"]) - 273.15
-    min_celsius = config.temp_min - 273.15
-    max_celsius = config.temp_max - 273.15
-
-    axes[0].plot(time, temp_celsius, "b-", linewidth=2)
-    axes[0].axhline(min_celsius, color="r", linestyle="--", label="Min")
-    axes[0].axhline(max_celsius, color="r", linestyle="--", label="Max")
-    axes[0].set_ylabel("Temperature (°C)")
-    axes[0].set_title("Adaptive Controller Service with RLS - 24h Simulation")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    # Heater status
-    heater_on = np.array(results["heater_on"])
-    axes[1].fill_between(
-        time, 0, heater_on, alpha=0.3, color="orange", label="Heater ON"
-    )
-    axes[1].set_ylabel("Heater Status")
-    axes[1].legend(loc="upper left")
-    axes[1].grid(True, alpha=0.3)
-
-    # Spot prices
-    axes[2].plot(time, results["spot_price"], "b-", linewidth=2, label="Spot Price")
-    axes[2].set_ylabel("Spot Price (DKK/kWh)")
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-
-    # Learned parameters over time
-    axes[3].plot(time, results["heating_rate"], "r-", linewidth=2, label="Heating Rate")
-    axes[3].axhline(1.5, color="r", linestyle="--", alpha=0.5, label="True value (1.5)")
-    axes[3].set_ylabel("Heating Rate (K/step)")
-    axes[3].legend()
-    axes[3].grid(True, alpha=0.3)
-
-    axes[4].plot(
-        time, results["cooling_coeff"], "b-", linewidth=2, label="Cooling Coefficient"
-    )
-    axes[4].axhline(
-        0.02, color="b", linestyle="--", alpha=0.5, label="True value (0.02)"
-    )
-    axes[4].set_ylabel("Cooling Coefficient")
-    axes[4].set_xlabel("Time (hours)")
-    axes[4].legend()
-    axes[4].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig("adaptive_controller_service_results.png")
-    print("Plot saved to adaptive_controller_service_results.png")
 
 
 if __name__ == "__main__":
