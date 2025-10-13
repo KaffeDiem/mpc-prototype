@@ -91,9 +91,19 @@ def main():
     prices = [p.price for p in prices]  # Extract just the price values
 
     # Perform initial measurements. Flip on for a few seconds to measure the initial watts when on.
-    smart_plug_service.turn_on()
-    time.sleep(3)
-    watts_on = smart_plug_service.get_status().power_watts
+    logging.info("Performing initial measurements...")
+    turn_on_success = smart_plug_service.turn_on()
+    if not turn_on_success:
+        logging.warning("Failed to turn on plug during initialization. Using default watts value.")
+        watts_on = 1000.0  # Default fallback value
+    else:
+        time.sleep(3)
+        watts_on = smart_plug_service.get_status().power_watts
+        if watts_on == 0.0:
+            logging.warning("Got 0W reading during initialization. Using default watts value.")
+            watts_on = 1000.0  # Default fallback value
+        else:
+            logging.info(f"Initial measurement: {watts_on}W when ON")
 
     step_counter = 0
 
