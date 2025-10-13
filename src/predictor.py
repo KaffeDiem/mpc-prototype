@@ -63,6 +63,7 @@ class Predictor:
         else:
             result = self._minimize_cost(future_prices)
             return result
+
     def _minimize_cost(self, future_prices: list[float]) -> PredictorResult:
         """
         Optimize the action sequence to minimize cost over the prediction horizon.
@@ -99,24 +100,29 @@ class Predictor:
         actions = [Action.ON if a >= 0.5 else Action.OFF for a in result.x]
 
         return PredictorResult(
-            actions[0], self._predict_future_temperature(actions[0]), self.power, actions
+            actions[0],
+            self._predict_future_temperature(
+                actions[0], ambient_temp=celsius_to_kelvin(15), power_on=1500
+            ),
+            self.power,
+            actions,
         )
 
-    def _predict_future_temperature(self, action: Action) -> float:
+    def _predict_future_temperature(
+        self, action: Action, ambient_temp: float, power_on: float
+    ) -> float:
         """
         Predict future temperature based on chosen action (ON/OFF).
         This is done using a simple thermal model with the UA value, ambient temperature, and current power.
         """
-        if action == Action.ON:
-            power = 100  # Example power when ON
-        else:
-            power = 0  # No power when OFF
+
+        power = power_on if action == Action.ON else 0
 
         # Simple thermal model: T_next = T_current + (Power - UA * (T_current - T_ambient)) * dt / C
         dt = 1  # time step in hours
         C = 4_184  # thermal capacity in J/K (water)
         delta_temp = (
-            (power - self.ua * (self.temperature - self.ambient_temp)) * dt * 3600 / C
+            (power - self.ua * (self.temperature - ambient_temp)) * dt * 3600 / C
         )
         return self.temperature + delta_temp
 
