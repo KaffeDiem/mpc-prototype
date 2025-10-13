@@ -6,9 +6,57 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def celsius_to_kelvin(celsius: float) -> float:
+    return celsius + 273.15
+
+
+def kelvin_to_celsius(kelvin: float) -> float:
+    return kelvin - 273.15
+
+
+@dataclass
+class ThermalSystemParams:
+    """
+    Simplified thermal system parameters that work for both water heaters and radiators.
+
+    All temperatures in Kelvin, making calculations consistent and future-proof.
+    """
+    heating_rate_k_per_step: float  # Temperature increase per step when heater is ON (K/step)
+    cooling_coefficient: float  # Cooling rate coefficient (fraction of temp difference lost per step)
+    ambient_temp_k: float  # Ambient temperature (Kelvin)
+
+    @classmethod
+    def water_heater(
+        cls,
+        heating_rate_k_per_step: float = 0.5,  # Slow heating (high thermal mass)
+        cooling_coefficient: float = 0.02,  # Slow cooling (well insulated)
+        ambient_temp_celsius: float = 20.0,
+    ) -> "ThermalSystemParams":
+        """Factory method for water heater systems (high thermal mass, slow response)"""
+        return cls(
+            heating_rate_k_per_step=heating_rate_k_per_step,
+            cooling_coefficient=cooling_coefficient,
+            ambient_temp_k=celsius_to_kelvin(ambient_temp_celsius),
+        )
+
+    @classmethod
+    def electric_radiator(
+        cls,
+        heating_rate_k_per_step: float = 2.0,  # Fast heating (low thermal mass)
+        cooling_coefficient: float = 0.1,  # Fast cooling (designed to dissipate heat)
+        ambient_temp_celsius: float = 20.0,
+    ) -> "ThermalSystemParams":
+        """Factory method for electric radiator systems (low thermal mass, fast response)"""
+        return cls(
+            heating_rate_k_per_step=heating_rate_k_per_step,
+            cooling_coefficient=cooling_coefficient,
+            ambient_temp_k=celsius_to_kelvin(ambient_temp_celsius),
+        )
+
+
 @dataclass
 class PredictorInitialMeasurements:
-    ua: float = 3.0  # Overall heat transfer coefficient in W/Km2
+    thermal_system: ThermalSystemParams
 
 
 @dataclass
@@ -37,7 +85,7 @@ class Predictor:
         initial_measurements: PredictorInitialMeasurements,
         config: PredictorConfig,
     ):
-        self.ua = initial_measurements.ua
+        self.thermal_system = initial_measurements.thermal_system
         self.config = config
 
     def get_next_action(
@@ -109,30 +157,35 @@ class Predictor:
 
         return PredictorResult(
             actions[0],
-            self._predict_future_temperature(
-                actions[0],
-                ambient_temp=celsius_to_kelvin(15),
-                watts_on=1500,
-                current_temp=current_temp,
-            ),
+            self._predict_future_temperature(actions[0], current_temp),
             watts_on,
             actions,
         )
 
     def _predict_future_temperature(
-        self, action: Action, ambient_temp: float, watts_on: float, current_temp: float
+        self, action: Action, current_temp: float
     ) -> float:
         """
         Predict future temperature based on chosen action (ON/OFF).
-        This is done using a simple thermal model with the UA value, ambient temperature, and current power.
+
+        Simple thermal model:
+        - When ON: ΔT = heating_rate - cooling_coefficient × (T - T_ambient)
+        - When OFF: ΔT = -cooling_coefficient × (T - T_ambient)
+
+        All calculations in Kelvin.
         """
+        # Temperature difference from ambient
+        temp_diff = current_temp - self.thermal_system.ambient_temp_k
 
-        power = watts_on if action == Action.ON else 0
+        # Heat loss (always occurs)
+        cooling_delta = -self.thermal_system.cooling_coefficient * temp_diff
 
-        # Simple thermal model: T_next = T_current + (Power - UA * (T_current - T_ambient)) * dt / C
-        dt = 1  # time step in hours
-        C = 4_184  # thermal capacity in J/K (water)
-        delta_temp = (power - self.ua * (current_temp - ambient_temp)) * dt * 3600 / C
+        # Heating (only when ON)
+        heating_delta = self.thermal_system.heating_rate_k_per_step if action == Action.ON else 0.0
+
+        # Total temperature change
+        delta_temp = heating_delta + cooling_delta
+
         return current_temp + delta_temp
 
     def plot(self, save_path: str):
@@ -164,11 +217,3 @@ class Predictor:
             index += 1
 
         return total_cost
-
-
-def celsius_to_kelvin(celsius: float) -> float:
-    return celsius + 273.15
-
-
-def kelvin_to_celsius(kelvin: float) -> float:
-    return kelvin - 273.15
