@@ -398,7 +398,8 @@ def main():
         # Update model with observed temperature change (for adaptive learning)
         prev_temperature_k = current_temperature_k
         current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
-        controller.update_model(prev_temperature_k, prediction.action, current_temperature_k)
+        current_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
+        controller.update_model(prev_temperature_k, prediction.action, current_temperature_k, current_ambient_temp_k)
         
         step_counter += 1
 

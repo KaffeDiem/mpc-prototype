@@ -23,7 +23,7 @@ class TestControllerService(unittest.TestCase):
         controller_service = ControllerService(initial_measurements, config)
 
         prices = [100.0, 50]
-        pred_result = controller_service._minimize_cost(prices, ambient_temp=20, watts_on=1_000, current_temp=50)
+        pred_result = controller_service._minimize_cost(prices, ambient_temp=celsius_to_kelvin(20), watts_on=1_000, current_temp=celsius_to_kelvin(50))
         assert (
             pred_result.action == Action.OFF
         ), f"Action should be OFF, got {pred_result.action}"
@@ -58,7 +58,8 @@ class TestControllerService(unittest.TestCase):
         controller_service = ControllerService(initial_measurements, config)
 
         current_temp = celsius_to_kelvin(50)  # 323.15K
-        next_temp = controller_service._predict_future_temperature(Action.ON, current_temp)
+        ambient_temp = celsius_to_kelvin(20)
+        next_temp = controller_service._predict_future_temperature(Action.ON, current_temp, ambient_temp)
 
         # Should heat up (heating_rate - cooling due to temp difference)
         assert next_temp > current_temp, "Temperature should increase when heater is ON"
@@ -75,7 +76,8 @@ class TestControllerService(unittest.TestCase):
         controller_service = ControllerService(initial_measurements, config)
 
         current_temp = celsius_to_kelvin(50)  # Above ambient
-        next_temp = controller_service._predict_future_temperature(Action.OFF, current_temp)
+        ambient_temp = celsius_to_kelvin(20)
+        next_temp = controller_service._predict_future_temperature(Action.OFF, current_temp, ambient_temp)
 
         # Should cool down towards ambient
         assert next_temp < current_temp, "Temperature should decrease when heater is OFF and above ambient"
@@ -95,9 +97,10 @@ class TestControllerService(unittest.TestCase):
         )
 
         start_temp = celsius_to_kelvin(25)
+        ambient_temp = celsius_to_kelvin(20)
 
-        radiator_temp = radiator_controller_service._predict_future_temperature(Action.ON, start_temp)
-        water_temp = water_controller_service._predict_future_temperature(Action.ON, start_temp)
+        radiator_temp = radiator_controller_service._predict_future_temperature(Action.ON, start_temp, ambient_temp)
+        water_temp = water_controller_service._predict_future_temperature(Action.ON, start_temp, ambient_temp)
 
         radiator_delta = radiator_temp - start_temp
         water_delta = water_temp - start_temp

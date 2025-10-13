@@ -119,7 +119,7 @@ class ControllerService:
         """
         Determine the next action (ON/OFF) for the system
         """
-        if current_temp < self.config.temp_min:
+        if current_temp <= self.config.temp_min:
             return ControllerServiceResult(
                 Action.ON, current_temp + 5, 100, [Action.ON]
             )  # Example values
@@ -162,13 +162,11 @@ class ControllerService:
 
             for action in action_sequence:
                 # Predict next temperature
-                temp = self._predict_future_temperature(action, temp)
+                temp = self._predict_future_temperature(action, temp, ambient_temp)
 
-                # Penalize violations of temperature bounds (hard constraints)
-                if temp < self.config.temp_min:
-                    comfort_penalty += 1000.0 * (self.config.temp_min - temp) ** 2
-                elif temp > self.config.temp_max:
-                    comfort_penalty += 1000.0 * (temp - self.config.temp_max) ** 2
+                # Hard constraint: return very large penalty if any violation occurs
+                if temp < self.config.temp_min or temp > self.config.temp_max:
+                    return 1e10
 
             total = sequence_price + comfort_penalty
             return total
@@ -203,13 +201,13 @@ class ControllerService:
 
         return ControllerServiceResult(
             actions[0],
-            self._predict_future_temperature(actions[0], current_temp),
+            self._predict_future_temperature(actions[0], current_temp, ambient_temp),
             watts_on,
             actions,
         )
 
     def _predict_future_temperature(
-        self, action: Action, current_temp: float
+        self, action: Action, current_temp: float, ambient_temp: float
     ) -> float:
         """
         Predict future temperature based on chosen action (ON/OFF).
@@ -221,7 +219,7 @@ class ControllerService:
         All calculations in Kelvin.
         """
         # Temperature difference from ambient
-        temp_diff = current_temp - self.thermal_system.ambient_temp_k
+        temp_diff = current_temp - ambient_temp
 
         # Heat loss (always occurs)
         cooling_delta = -self.thermal_system.cooling_coefficient * temp_diff
@@ -234,7 +232,7 @@ class ControllerService:
 
         return current_temp + delta_temp
 
-    def update_model(self, temp_before: float, action_taken: Action, temp_after: float):
+    def update_model(self, temp_before: float, action_taken: Action, temp_after: float, ambient_temp: float):
         """
         Update model parameters using Recursive Least Squares (RLS).
 
@@ -242,6 +240,7 @@ class ControllerService:
             temp_before: Temperature before action (Kelvin)
             action_taken: Action that was taken (ON/OFF)
             temp_after: Observed temperature after action (Kelvin)
+            ambient_temp: Current ambient temperature (Kelvin)
         """
         # Store observation
         self.observation_history.append((temp_before, action_taken, temp_after))
@@ -254,7 +253,7 @@ class ControllerService:
         delta_temp_observed = temp_after - temp_before
 
         # Predicted temperature change using current parameters
-        delta_temp_predicted = self._predict_delta_temp(action_taken, temp_before)
+        delta_temp_predicted = self._predict_delta_temp(action_taken, temp_before, ambient_temp)
 
         # Prediction error
         prediction_error = delta_temp_observed - delta_temp_predicted
@@ -262,7 +261,7 @@ class ControllerService:
 
         # Build regressor vector φ
         # Model: ΔT = heating_rate × action - cooling_coefficient × (T - T_ambient)
-        temp_diff = temp_before - self.thermal_system.ambient_temp_k
+        temp_diff = temp_before - ambient_temp
         action_value = 1.0 if action_taken == Action.ON else 0.0
 
         phi = np.array([
@@ -292,9 +291,9 @@ class ControllerService:
             self.thermal_system.heating_rate_k_per_step = self.theta[0]
             self.thermal_system.cooling_coefficient = self.theta[1]
 
-    def _predict_delta_temp(self, action: Action, current_temp: float) -> float:
+    def _predict_delta_temp(self, action: Action, current_temp: float, ambient_temp: float) -> float:
         """Helper to predict temperature change (not absolute temperature)"""
-        temp_diff = current_temp - self.thermal_system.ambient_temp_k
+        temp_diff = current_temp - ambient_temp
         cooling_delta = -self.thermal_system.cooling_coefficient * temp_diff
         heating_delta = self.thermal_system.heating_rate_k_per_step if action == Action.ON else 0.0
         return heating_delta + cooling_delta
