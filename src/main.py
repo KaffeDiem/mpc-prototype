@@ -3,6 +3,8 @@
 from datetime import date, timedelta
 import logging
 from prices_service import PricesService
+from weather_service import WeatherService
+from smart_plug_service import SmartPlugService
 from controller_service import ThermalSystemParams, ControllerServiceConfig
 from simulator import Simulator
 import numpy as np
@@ -17,58 +19,63 @@ logging.basicConfig(
 def main():
     # Initialize service for DK2 region (Copenhagen/East of Great Belt)
     # Use "DK1" for Aarhus/West of Great Belt
-    service = PricesService(region="DK2")
+    price_service = PricesService(region="DK2")
+    weather_service = WeatherService()
 
     # Get today's and tomorrow's prices
     today = date.today()
     tomorrow = today + timedelta(days=1)
 
-    prices = service.get_prices(today, tomorrow)
+    prices = price_service.get_prices(today, tomorrow)
     prices = [p.price for p in prices] # Extract just the price values
     print(f"\nRetrieved {len(prices)} hourly prices:")
     print(f"Price range: {min(prices):.3f} - {max(prices):.3f} DKK/kWh")
     print(f"Mean price: {sum(prices)/len(prices):.3f} DKK/kWh\n")
 
-    horizon_hours = 24 # Limit to 24 hours for performance
-    timesteps_per_hour = 2  # 30-minute intervals (balance between resolution and speed)
-    total_timesteps = horizon_hours * timesteps_per_hour
+    smart_plug_service = SmartPlugService()
+    smart_plug_service.turn_off()
+    smart_plug_service.turn_on()
 
-    spot_prices = np.repeat(prices, timesteps_per_hour)
+    # horizon_hours = 24 # Limit to 24 hours for performance
+    # timesteps_per_hour = 2  # 30-minute intervals (balance between resolution and speed)
+    # total_timesteps = horizon_hours * timesteps_per_hour
 
-    # Initialize controller with initial parameter guesstimates (intentionally slightly wrong)
-    thermal_system = ThermalSystemParams.water_heater(
-        heating_rate_k_per_step=1.5,  # Initial guess (true is 1.5)
-        cooling_coefficient=0.015,     # Initial guess (true might be 0.02)
-        ambient_temp_celsius=20.0
-    )
-    config = ControllerServiceConfig(
-        temp_min=318.15,  # 45°C
-        temp_max=333.15,  # 60°C - more realistic max for water heater
-        steps_per_hour=timesteps_per_hour
-    )
+    # spot_prices = np.repeat(prices, timesteps_per_hour)
 
-    # Create and run simulator
-    simulator = Simulator(
-        thermal_system=thermal_system,
-        config=config,
-        watts_on=3000.0,  # 3kW heater
-        initial_temp=323.15,  # Start at 50°C = 323.15K
-        true_heating_rate=1.5,  # True value
-        true_cooling_coeff=0.02,  # True value
-        measurement_noise_std=0.1
-    )
+    # # Initialize controller with initial parameter guesstimates (intentionally slightly wrong)
+    # thermal_system = ThermalSystemParams.water_heater(
+    #     heating_rate_k_per_step=1.5,  # Initial guess (true is 1.5)
+    #     cooling_coefficient=0.015,     # Initial guess (true might be 0.02)
+    #     ambient_temp_celsius=20.0
+    # )
+    # config = ControllerServiceConfig(
+    #     temp_min=318.15,  # 45°C
+    #     temp_max=333.15,  # 60°C - more realistic max for water heater
+    #     steps_per_hour=timesteps_per_hour
+    # )
 
-    results = simulator.run(
-        spot_prices=spot_prices,
-        total_timesteps=total_timesteps,
-        print_progress=True,
-        progress_interval_hours=2
-    )
+    # # Create and run simulator
+    # simulator = Simulator(
+    #     thermal_system=thermal_system,
+    #     config=config,
+    #     watts_on=3000.0,  # 3kW heater
+    #     initial_temp=323.15,  # Start at 50°C = 323.15K
+    #     true_heating_rate=1.5,  # True value
+    #     true_cooling_coeff=0.02,  # True value
+    #     measurement_noise_std=0.1
+    # )
 
-    simulator.print_summary()
-    print("Simulation complete. Plotting results...")
+    # results = simulator.run(
+    #     spot_prices=spot_prices,
+    #     total_timesteps=total_timesteps,
+    #     print_progress=True,
+    #     progress_interval_hours=2
+    # )
 
-    plot_results(results, config)
+    # simulator.print_summary()
+    # print("Simulation complete. Plotting results...")
+
+    # plot_results(results, config)
 
 
 def plot_results(results, config):
