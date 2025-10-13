@@ -1,81 +1,77 @@
 """Simple example usage of the PricesService to fetch Danish electricity prices."""
 
 from datetime import date, timedelta
+from time import time
 import logging
 from prices_service import PricesService
 from weather_service import WeatherService
 from smart_plug_service import SmartPlugService
-from controller_service import ThermalSystemParams, ControllerServiceConfig
+from controller_service import *
 from simulator import Simulator
 import numpy as np
 import matplotlib.pyplot as plt
 
 # Set up logging to see any warnings about missing dates
 logging.basicConfig(
-    level=logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.WARNING, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
+
 def main():
+    steps_per_hour = 12  # 5-minute intervals
+    seconds_per_step = 3600 / steps_per_hour
+    start_time = time()
+
     # Initialize service for DK2 region (Copenhagen/East of Great Belt)
     # Use "DK1" for Aarhus/West of Great Belt
     price_service = PricesService(region="DK2")
     weather_service = WeatherService()
+    smart_plug_service = SmartPlugService()
+
+    thermal_system = ThermalSystemParams(
+        heating_rate_k_per_step=25,
+        cooling_coefficient=0.1,
+        ambient_temp_k=celsius_to_kelvin(20.0),
+    )
+    initial_measurements = ControllerServiceInitialMeasurements(
+        thermal_system=thermal_system
+    )
+    config = ControllerServiceConfig(
+        temp_min=celsius_to_kelvin(45.0),
+        temp_max=celsius_to_kelvin(70.0),
+        steps_per_hour=steps_per_hour
+    )
+    controller = ControllerService(initial_measurements=initial_measurements, config=config)
 
     # Get today's and tomorrow's prices
     today = date.today()
     tomorrow = today + timedelta(days=1)
 
     prices = price_service.get_prices(today, tomorrow)
-    prices = [p.price for p in prices] # Extract just the price values
-    print(f"\nRetrieved {len(prices)} hourly prices:")
-    print(f"Price range: {min(prices):.3f} - {max(prices):.3f} DKK/kWh")
-    print(f"Mean price: {sum(prices)/len(prices):.3f} DKK/kWh\n")
+    prices = [p.price for p in prices]  # Extract just the price values
 
-    smart_plug_service = SmartPlugService()
-    smart_plug_service.turn_off()
-    smart_plug_service.turn_on()
+    current_temperature_k = celsius_to_kelvin(50.0)  # Initial temperature guess
+    prev_temp_k = current_temperature_k
+    watts_on = 0.0
+    while True:
+        spot_prices = np.repeat(prices, steps_per_hour)
+        # TODO: Read current temperature from sensor
 
-    # horizon_hours = 24 # Limit to 24 hours for performance
-    # timesteps_per_hour = 2  # 30-minute intervals (balance between resolution and speed)
-    # total_timesteps = horizon_hours * timesteps_per_hour
+        ambient_temp_c = weather_service.get_current_temperature()
 
-    # spot_prices = np.repeat(prices, timesteps_per_hour)
+        prediction = controller.get_next_action(
+            current_temp=current_temperature_k,
+            future_prices=spot_prices.tolist(),
+            ambient_temp=celsius_to_kelvin(ambient_temp_c),
+            watts_on=1500.0
+        )
 
-    # # Initialize controller with initial parameter guesstimates (intentionally slightly wrong)
-    # thermal_system = ThermalSystemParams.water_heater(
-    #     heating_rate_k_per_step=1.5,  # Initial guess (true is 1.5)
-    #     cooling_coefficient=0.015,     # Initial guess (true might be 0.02)
-    #     ambient_temp_celsius=20.0
-    # )
-    # config = ControllerServiceConfig(
-    #     temp_min=318.15,  # 45°C
-    #     temp_max=333.15,  # 60°C - more realistic max for water heater
-    #     steps_per_hour=timesteps_per_hour
-    # )
+        if prediction.action == Action.ON:
+            smart_plug_service.turn_on()
+        else:
+            smart_plug_service.turn_off()
 
-    # # Create and run simulator
-    # simulator = Simulator(
-    #     thermal_system=thermal_system,
-    #     config=config,
-    #     watts_on=3000.0,  # 3kW heater
-    #     initial_temp=323.15,  # Start at 50°C = 323.15K
-    #     true_heating_rate=1.5,  # True value
-    #     true_cooling_coeff=0.02,  # True value
-    #     measurement_noise_std=0.1
-    # )
-
-    # results = simulator.run(
-    #     spot_prices=spot_prices,
-    #     total_timesteps=total_timesteps,
-    #     print_progress=True,
-    #     progress_interval_hours=2
-    # )
-
-    # simulator.print_summary()
-    # print("Simulation complete. Plotting results...")
-
-    # plot_results(results, config)
+        time.sleep(seconds_per_step)  # Wait 15 minutes between checks
 
 
 def plot_results(results, config):
@@ -119,8 +115,12 @@ def plot_results(results, config):
     axes[3].legend()
     axes[3].grid(True, alpha=0.3)
 
-    axes[4].plot(time, results["cooling_coeff"], "b-", linewidth=2, label="Cooling Coefficient")
-    axes[4].axhline(0.02, color="b", linestyle="--", alpha=0.5, label="True value (0.02)")
+    axes[4].plot(
+        time, results["cooling_coeff"], "b-", linewidth=2, label="Cooling Coefficient"
+    )
+    axes[4].axhline(
+        0.02, color="b", linestyle="--", alpha=0.5, label="True value (0.02)"
+    )
     axes[4].set_ylabel("Cooling Coefficient")
     axes[4].set_xlabel("Time (hours)")
     axes[4].legend()
