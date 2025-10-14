@@ -30,11 +30,6 @@ class ThermalSystemParams:
 
 
 @dataclass
-class ControllerServiceInitialMeasurements:
-    thermal_system: ThermalSystemParams
-
-
-@dataclass
 class ControllerServiceConfig:
     temp_min: float  
     temp_max: float 

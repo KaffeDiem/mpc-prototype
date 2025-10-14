@@ -18,7 +18,6 @@ from controller_service import (
     celsius_to_kelvin,
     kelvin_to_celsius,
     ThermalSystemParams,
-    ControllerServiceInitialMeasurements,
     ControllerServiceConfig,
     ControllerService,
 )
@@ -55,13 +54,12 @@ def initialize_controller(
         cooling_coefficient=0.04,
         ambient_temp_k=current_ambient_temp_k,
     )
-    initial_measurements = ControllerServiceInitialMeasurements(thermal_system=thermal_system)
     config = ControllerServiceConfig(
         temp_min=celsius_to_kelvin(temp_min_celsius),
         temp_max=celsius_to_kelvin(temp_max_celsius),
         steps_per_hour=steps_per_hour
     )
-    return ControllerService(initial_measurements=initial_measurements, config=config)
+    return ControllerService(initial_measurements=thermal_system, config=config)
 
 
 def perform_initial_measurements(smart_plug_service: SmartPlugService) -> float:

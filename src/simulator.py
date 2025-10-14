@@ -4,7 +4,6 @@ from typing import Dict, List
 import numpy as np
 from controller_service import (
     ControllerService,
-    ControllerServiceInitialMeasurements,
     ThermalSystemParams,
     ControllerServiceConfig,
     Action
@@ -53,7 +52,7 @@ class Simulator:
 
         # Initialize controller service
         self.controller_service = ControllerService(
-            ControllerServiceInitialMeasurements(thermal_system=thermal_system),
+            initial_measurements=thermal_system,
             config=config
         )
 
@@ -102,7 +101,7 @@ class Simulator:
         T_measured = T_next + np.random.normal(0, self.measurement_noise_std)
 
         # Update controller service's model (adaptive learning with RLS)
-        self.controller_service.update_model(self.T_current, pred_result.action, T_measured)
+        self.controller_service.update_model(self.T_current, pred_result.action, T_measured, self.thermal_system.ambient_temp_k)
 
         # Calculate costs
         timestep_hours = 1.0 / self.config.steps_per_hour
