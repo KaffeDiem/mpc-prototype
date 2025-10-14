@@ -255,6 +255,61 @@ def execute_action_and_update_watts(
         return 0.0
 
 
+def simulate_trajectory_with_prices(
+    controller: ControllerService,
+    trajectory: list[Action],
+    initial_temp: float,
+    ambient_temp: float,
+    future_prices: list[float],
+    steps_per_hour: int
+) -> list[tuple[Action, float, float]]:
+    """
+    Simulate trajectory and return (action, predicted_temp_celsius, price) for each step.
+    
+    Args:
+        controller: The controller service with thermal model
+        trajectory: List of actions to simulate
+        initial_temp: Starting temperature in Kelvin
+        ambient_temp: Ambient temperature in Kelvin
+        future_prices: List of hourly prices
+        steps_per_hour: Number of steps per hour
+    
+    Returns:
+        List of tuples: (action, predicted_temp_celsius, price)
+    """
+    result = []
+    current_temp = initial_temp
+    
+    for step_idx, action in enumerate(trajectory):
+        # Get price for this step
+        hour_idx = step_idx // steps_per_hour
+        if hour_idx < len(future_prices):
+            price = future_prices[hour_idx]
+        else:
+            price = future_prices[-1] if future_prices else 0.0
+        
+        # Predict next temperature
+        next_temp = controller._predict_future_temperature(action, current_temp, ambient_temp)
+        
+        # Store result (convert temp to Celsius)
+        result.append((action, kelvin_to_celsius(next_temp), price))
+        
+        # Update for next iteration
+        current_temp = next_temp
+    
+    return result
+
+
+def print_trajectory_details(trajectory_data: list[tuple[Action, float, float]]) -> None:
+    """Print formatted trajectory showing action, temperature, and price for each step."""
+    print("\nPredicted Trajectory:")
+    print("Step | Action | Predicted Temp (°C) | Price (DKK/kWh)")
+    print("-" * 60)
+    
+    for step_idx, (action, temp_celsius, price) in enumerate(trajectory_data):
+        print(f"{step_idx:4d} | {action.name:6s} | {temp_celsius:18.2f} | {price:15.2f}")
+
+
 def print_step_info(
     step_counter: int,
     action: Action,
@@ -402,6 +457,17 @@ def main():
             cost_per_step=cost_per_step,
             cumulative_cost_dkk=cumulative_cost_dkk
         )
+        
+        # ===== PRINT TRAJECTORY DETAILS =====
+        trajectory_data = simulate_trajectory_with_prices(
+            controller=controller,
+            trajectory=prediction.trajectory,
+            initial_temp=current_temperature_k,
+            ambient_temp=ambient_temp_k,
+            future_prices=future_price_list,
+            steps_per_hour=steps_per_hour
+        )
+        print_trajectory_details(trajectory_data)
 
         # ===== WAIT FOR NEXT STEP =====
         time.sleep(seconds_per_step)
