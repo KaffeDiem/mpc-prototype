@@ -61,9 +61,9 @@ class ControllerServiceInitialMeasurements:
 
 @dataclass
 class ControllerServiceConfig:
-    temp_min: float = 323.15  # in Kelvin (50°C)
-    temp_max: float = 343.15  # in Kelvin (70°C)
-    steps_per_hour: int = 30
+    temp_min: float
+    temp_max: float
+    steps_per_hour: int
 
 
 class Action(Enum):
