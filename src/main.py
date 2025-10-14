@@ -143,10 +143,10 @@ def get_current_spot_price(prices: list[Price]) -> float:
         return 1.0
 
 
-def prepare_future_prices(prices: list[Price], steps_per_hour: int) -> list[float]:
+def prepare_future_prices(prices: list[Price]) -> list[float]:
     """
-    Filter future prices and expand them to match the steps per hour.
-    Returns a list of price values repeated for each step.
+    Filter future prices and return hourly values.
+    Controller will expand these per-step internally.
     """
     now = datetime.now()
     current_hour = now.replace(minute=0, second=0, microsecond=0)
@@ -154,11 +154,10 @@ def prepare_future_prices(prices: list[Price], steps_per_hour: int) -> list[floa
     # Filter to get only future prices
     future_prices = [p for p in prices if p.date >= current_hour]
     
-    # Extract just the price values and repeat per step
+    # Extract just the hourly price values (no repetition)
     future_price_values = [p.price for p in future_prices]
-    spot_prices = np.repeat(future_price_values, steps_per_hour)
     
-    return spot_prices.tolist()
+    return future_price_values
 
 
 # ============================================================================
@@ -351,7 +350,7 @@ def main():
         current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
         ambient_temp_c = weather_service.get_current_temperature()
         ambient_temp_k = celsius_to_kelvin(ambient_temp_c)
-        future_price_list = prepare_future_prices(prices, steps_per_hour)
+        future_price_list = prepare_future_prices(prices)
         current_spot_price = get_current_spot_price(prices)
 
         # ===== PREDICT NEXT ACTION =====
