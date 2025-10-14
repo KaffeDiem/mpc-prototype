@@ -150,17 +150,22 @@ class ControllerService:
 
             # Simulate temperature trajectory and penalize constraint violations
             temp = current_temp
-            comfort_penalty = 0.0
+            violation_penalty = 0.0
 
             for action in action_sequence:
                 # Predict next temperature
                 temp = self._predict_future_temperature(action, temp, ambient_temp)
 
-                # Hard constraint: return very large penalty if any violation occurs
-                if temp < self.config.temp_min or temp > self.config.temp_max:
-                    return 1e10
+                # Soft constraint: quadratic penalty proportional to violation magnitude
+                # This allows optimizer to prefer "less bad" violations when necessary
+                if temp < self.config.temp_min:
+                    violation = self.config.temp_min - temp
+                    violation_penalty += 1000.0 * (violation ** 2)
+                elif temp > self.config.temp_max:
+                    violation = temp - self.config.temp_max
+                    violation_penalty += 1000.0 * (violation ** 2)
 
-            total = sequence_price + comfort_penalty
+            total = sequence_price + violation_penalty
             return total
 
         # Limit optimization horizon (max 24 hours look-ahead) 
