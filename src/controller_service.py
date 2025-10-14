@@ -1,7 +1,6 @@
 from typing import Any
 from dataclasses import dataclass
 from enum import Enum
-from scipy.optimize import differential_evolution
 import numpy as np
 
 
@@ -29,7 +28,10 @@ class ThermalSystemParams:
 class ControllerServiceConfig:
     temp_min: float  
     temp_max: float 
-    steps_per_hour: int 
+    steps_per_hour: int
+    grid_step: float = 0.1            # Kelvin discretization
+    grid_pad: float = 3.0             # Extra range beyond min/max (Kelvin)
+    penalty_scale: float = 1_000.0    # Cubic penalty coefficient 
 
 
 class Action(Enum):
@@ -81,6 +83,125 @@ class ControllerService:
         self.heating_rate_bounds = (0.5, 3.0)  # K/step - tighter bounds for stability
         self.cooling_coeff_bounds = (0.010, 0.030)  # Must be positive - tighter bounds
 
+    def _build_temperature_grid(self, ambient_temp: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Create temperature grid and precompute transitions for OFF/ON actions.
+        
+        Args:
+            ambient_temp: Current ambient temperature (Kelvin)
+            
+        Returns:
+            Tuple of (temps_grid, next_idx_off, next_idx_on, penalty_lut)
+            - temps_grid: Array of discrete temperature values (Kelvin)
+            - next_idx_off: Next state index for OFF action at each grid point
+            - next_idx_on: Next state index for ON action at each grid point
+            - penalty_lut: Penalty value for each temperature state
+        """
+        grid_min = self.config.temp_min - self.config.grid_pad
+        grid_max = self.config.temp_max + self.config.grid_pad
+        temps_grid = np.arange(grid_min, grid_max + self.config.grid_step, self.config.grid_step)
+        S = len(temps_grid)
+        
+        def clamp_to_idx(temp: float) -> int:
+            """Convert temperature to nearest grid index, clamped to valid range."""
+            j = int(np.round((temp - grid_min) / self.config.grid_step))
+            return max(0, min(S - 1, j))
+        
+        # Precompute transitions for each grid point
+        next_idx_off = np.empty(S, dtype=np.int32)
+        next_idx_on = np.empty(S, dtype=np.int32)
+        
+        for s in range(S):
+            t_now = temps_grid[s]
+            temp_diff = t_now - ambient_temp
+            
+            # OFF: only cooling (temperature-dependent)
+            cooling_delta = -self.thermal_system.cooling_coefficient * temp_diff
+            next_temp_off = t_now + cooling_delta
+            next_idx_off[s] = clamp_to_idx(next_temp_off)
+            
+            # ON: cooling + heating
+            heating_delta = self.thermal_system.heating_rate_k_per_step
+            next_temp_on = t_now + cooling_delta + heating_delta
+            next_idx_on[s] = clamp_to_idx(next_temp_on)
+        
+        # Penalty lookup table: cubic penalty for constraint violations
+        low = np.maximum(0.0, self.config.temp_min - temps_grid)
+        high = np.maximum(0.0, temps_grid - self.config.temp_max)
+        penalty_lut = self.config.penalty_scale * (low**3 + high**3)
+        
+        return temps_grid, next_idx_off, next_idx_on, penalty_lut
+
+    def _dp_solve(
+        self,
+        current_temp: float,
+        ambient_temp: float,
+        future_prices: list[float],
+        watts_on: float,
+        optimization_steps: int
+    ) -> list[Action]:
+        """
+        Solve optimal ON/OFF heating schedule via dynamic programming.
+        
+        Args:
+            current_temp: Current temperature (Kelvin)
+            ambient_temp: Ambient temperature (Kelvin)
+            future_prices: List of hourly prices (DKK/kWh)
+            watts_on: Power consumption when ON (watts)
+            optimization_steps: Number of time steps to optimize over
+            
+        Returns:
+            List of optimal actions for each time step
+        """
+        # Build temperature grid and transition tables
+        temps_grid, next_idx_off, next_idx_on, penalty_lut = self._build_temperature_grid(ambient_temp)
+        S = len(temps_grid)
+        T = optimization_steps
+        
+        # Value function and policy
+        V = np.zeros((T + 1, S))
+        pi = np.zeros((T, S), dtype=np.uint8)  # 0=OFF, 1=ON
+        
+        # Backward pass: compute optimal value and policy
+        for t in range(T - 1, -1, -1):
+            # Get price for this time step (convert step index to hour index)
+            hour_idx = t // self.config.steps_per_hour
+            if hour_idx < len(future_prices):
+                price = future_prices[hour_idx]
+            else:
+                price = future_prices[-1] if future_prices else 0.0
+            
+            # Energy cost per step when ON
+            energy_kwh = (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
+            energy_cost = energy_kwh * price
+            
+            # Compute cost for OFF action at each state
+            cost_off = penalty_lut[next_idx_off] + V[t + 1, next_idx_off]
+            
+            # Compute cost for ON action at each state
+            cost_on = energy_cost + penalty_lut[next_idx_on] + V[t + 1, next_idx_on]
+            
+            # Choose better action at each state
+            better_is_on = cost_on < cost_off
+            V[t] = np.where(better_is_on, cost_on, cost_off)
+            pi[t] = better_is_on.astype(np.uint8)
+        
+        # Find starting state index (closest grid point to current temperature)
+        grid_min = temps_grid[0]
+        s0 = int(np.clip(np.round((current_temp - grid_min) / self.config.grid_step), 0, S - 1))
+        
+        # Forward pass: extract optimal action sequence
+        actions = []
+        s = s0
+        for t in range(T):
+            a = pi[t, s]
+            action = Action.ON if a else Action.OFF
+            actions.append(action)
+            # Move to next state
+            s = next_idx_on[s] if a else next_idx_off[s]
+        
+        return actions
+
     def get_next_action(
         self,
         current_temp: float,
@@ -89,40 +210,21 @@ class ControllerService:
         watts_on: float,
     ) -> ControllerServiceResult:
         """
-        Determine the next action (ON/OFF) for the system using MPC optimization with
-        soft temperature constraints enforced via large penalties in the objective.
+        Determine the next action (ON/OFF) for the system using dynamic programming
+        with soft temperature constraints enforced via large penalties in the objective.
         """
-
-        def objective(actions: np.ndarray) -> float:
-            TEMP_VIOLATION_PENALTY = 1_000
-
-            temperature = current_temp
-            cost = 0.0
-            for i, action in enumerate(actions):
-                action = Action.ON if action > 0.5 else Action.OFF
-                temperature = self._predict_future_temperature(action, temperature, ambient_temp)
-                price_index = i // self.config.steps_per_hour
-                cost += future_prices[price_index] * watts_on / 1000.0
-
-                if temperature < self.config.temp_min:
-                    penalty = TEMP_VIOLATION_PENALTY * (self.config.temp_min - temperature) ** 3
-                    cost += penalty
-                if temperature > self.config.temp_max:
-                    penalty = TEMP_VIOLATION_PENALTY * (temperature - self.config.temp_max) ** 3
-                    cost += penalty
-
-            return cost
-
         # Limit optimization horizon (max 24 hours look-ahead) 
         optimization_horizon_hours = min(24, len(future_prices))
         optimization_steps = optimization_horizon_hours * self.config.steps_per_hour
 
-        x0 = np.full(optimization_steps, 0.5)
-
-        bounds = [(0, 1)] * optimization_steps
-        result = differential_evolution(objective, bounds, maxiter=5000, polish=False)
-
-        actions = [Action.ON if action > 0.5 else Action.OFF for action in result.x]
+        # Solve using dynamic programming
+        actions = self._dp_solve(
+            current_temp=current_temp,
+            ambient_temp=ambient_temp,
+            future_prices=future_prices,
+            watts_on=watts_on,
+            optimization_steps=optimization_steps
+        )
 
         # Build detailed trajectory with temperature and cost predictions
         trajectory = self._build_trajectory_with_details(
