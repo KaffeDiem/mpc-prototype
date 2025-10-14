@@ -167,30 +167,27 @@ class ControllerService:
                 sequence=action_sequence,
                 watts_on=watts_on,
             )
-            return sequence_price
 
-        def temperature_constraints(actions: np.ndarray) -> np.ndarray:
-            """
-            Constraint function that returns an array of values that must be >= 0.
-            Each element represents: min(T - temp_min, temp_max - T) for each timestep.
-            If all values are >= 0, all temperatures are within bounds.
-            """
-            action_sequence = [Action.ON if a >= 0.5 else Action.OFF for a in actions]
+            # Calculate the future temperature trajectory. If they are outside the bounds, return a large penalty
+            # The penalty should be extremely large and increasing as the temperature moves further outside the bounds.
+            # This makes sure that the optimizer will never choose an action that will move the temperature further outside the bounds.
+            temp_trajectory = self._simulate_temperature_trajectory(
+                action_sequence, current_temp, ambient_temp
+            )
             
-            constraints = []
-            temp = current_temp
-            
-            for action in action_sequence:
-                # Predict next temperature
-                temp = self._predict_future_temperature(action, temp, ambient_temp)
-                
-                # Add constraint: temp >= temp_min (reformulated as temp - temp_min >= 0)
-                constraints.append(temp - self.config.temp_min)
-                
-                # Add constraint: temp <= temp_max (reformulated as temp_max - temp >= 0)
-                constraints.append(self.config.temp_max - temp)
-            
-            return np.array(constraints)
+            # Calculate penalty for constraint violations
+            penalty = 0.0
+            for temp in temp_trajectory:
+                if temp < self.config.temp_min:
+                    # Exponential penalty for being below minimum
+                    violation = self.config.temp_min - temp
+                    penalty += 1e6 * (violation ** 2)  # Quadratic scaling for smooth gradient
+                elif temp > self.config.temp_max:
+                    # Exponential penalty for being above maximum
+                    violation = temp - self.config.temp_max
+                    penalty += 1e6 * (violation ** 2)  # Quadratic scaling for smooth gradient
+
+            return sequence_price + penalty
 
         # Limit optimization horizon (max 24 hours look-ahead) 
         optimization_horizon_hours = min(24, len(future_prices))
@@ -207,12 +204,6 @@ class ControllerService:
         # Ensure x0 has correct length
         assert(len(x0) == optimization_steps)
 
-        # Define constraint dictionary for SLSQP method
-        constraint_dict = {
-            'type': 'ineq',  # inequality constraint (>= 0)
-            'fun': temperature_constraints
-        }
-
         # Optimize action sequence with hard constraints
         # Note: pyright has strict typing for scipy.optimize.minimize constraints parameter
         result = minimize(  # type: ignore[call-overload]
@@ -220,7 +211,6 @@ class ControllerService:
             x0=x0,
             bounds=[(0, 1)] * len(x0),
             method='SLSQP',  # Required for constraints
-            constraints=[constraint_dict],
             options={'disp': False, 'maxiter': 200}  # Increased iterations for constrained optimization
         )
 
@@ -327,6 +317,30 @@ class ControllerService:
         delta_temp = heating_delta + cooling_delta
 
         return current_temp + delta_temp
+
+    def _simulate_temperature_trajectory(
+        self, action_sequence: list[Action], initial_temp: float, ambient_temp: float
+    ) -> list[float]:
+        """
+        Simulate the temperature trajectory over the entire action sequence.
+
+        Args:
+            action_sequence: Sequence of actions (ON/OFF) to simulate
+            initial_temp: Starting temperature (Kelvin)
+            ambient_temp: Ambient temperature (Kelvin)
+
+        Returns:
+            List of temperatures at each step (Kelvin)
+        """
+        trajectory = []
+        current_temp = initial_temp
+
+        for action in action_sequence:
+            # Predict next temperature based on action
+            current_temp = self._predict_future_temperature(action, current_temp, ambient_temp)
+            trajectory.append(current_temp)
+
+        return trajectory
 
     def update_model(self, temp_before: float, action_taken: Action, temp_after: float, ambient_temp: float):
         """
