@@ -253,59 +253,15 @@ def execute_action_and_update_watts(
         return 0.0
 
 
-def simulate_trajectory_with_prices(
-    controller: ControllerService,
-    trajectory: list[Action],
-    initial_temp: float,
-    ambient_temp: float,
-    future_prices: list[float],
-    steps_per_hour: int
-) -> list[tuple[Action, float, float]]:
-    """
-    Simulate trajectory and return (action, predicted_temp_celsius, price) for each step.
-    
-    Args:
-        controller: The controller service with thermal model
-        trajectory: List of actions to simulate
-        initial_temp: Starting temperature in Kelvin
-        ambient_temp: Ambient temperature in Kelvin
-        future_prices: List of hourly prices
-        steps_per_hour: Number of steps per hour
-    
-    Returns:
-        List of tuples: (action, predicted_temp_celsius, price)
-    """
-    result = []
-    current_temp = initial_temp
-    
-    for step_idx, action in enumerate(trajectory):
-        # Get price for this step
-        hour_idx = step_idx // steps_per_hour
-        if hour_idx < len(future_prices):
-            price = future_prices[hour_idx]
-        else:
-            price = future_prices[-1] if future_prices else 0.0
-        
-        # Predict next temperature
-        next_temp = controller._predict_future_temperature(action, current_temp, ambient_temp)
-        
-        # Store result (convert temp to Celsius)
-        result.append((action, kelvin_to_celsius(next_temp), price))
-        
-        # Update for next iteration
-        current_temp = next_temp
-    
-    return result
-
-
-def print_trajectory_details(trajectory_data: list[tuple[Action, float, float]]) -> None:
-    """Print formatted trajectory showing action, temperature, and price for each step."""
+def print_trajectory_details(trajectory: list) -> None:
+    """Print formatted trajectory showing action, temperature, price, and cost for each step."""
     print("\nPredicted Trajectory:")
-    print("Step | Action | Predicted Temp (°C) | Price (DKK/kWh)")
-    print("-" * 60)
+    print("Step | Action | Predicted Temp (°C) | Price (DKK/kWh) | Cost (DKK)")
+    print("-" * 75)
     
-    for step_idx, (action, temp_celsius, price) in enumerate(trajectory_data):
-        print(f"{step_idx:4d} | {action.name:6s} | {temp_celsius:18.2f} | {price:15.2f}")
+    for step_idx, step in enumerate(trajectory):
+        temp_celsius = kelvin_to_celsius(step.predicted_temperature)
+        print(f"{step_idx:4d} | {step.action.name:6s} | {temp_celsius:18.2f} | {step.price:15.2f} | {step.predicted_cost:11.4f}")
 
 
 def print_step_info(
@@ -408,7 +364,7 @@ def main():
         )
 
         # ===== EXECUTE ACTION =====
-        actual_watts = execute_action_and_update_watts(prediction.action, smart_plug_service)
+        actual_watts = execute_action_and_update_watts(prediction.trajectory[0].action, smart_plug_service)
         
         # Update expected watts if actual measurement differs significantly (>10%)
         if abs(actual_watts - expected_watts_on) / max(expected_watts_on, 1.0) > 0.10:
@@ -417,7 +373,7 @@ def main():
         
         # ===== CALCULATE COSTS =====
         cost_per_step = calculate_step_cost(
-            prediction.action,
+            prediction.trajectory[0].action,
             expected_watts_on,  # Use expected watts for cost calculation
             current_spot_price,
             seconds_per_step
@@ -430,12 +386,12 @@ def main():
             step_counter=step_counter,
             current_temperature_k=current_temperature_k,
             ambient_temp_c=ambient_temp_c,
-            action=prediction.action,
+            action=prediction.trajectory[0].action,
             watts_on=actual_watts,  # Log actual measured watts
             current_spot_price=current_spot_price,
             heating_rate=controller.theta[0],
             cooling_coeff=controller.theta[1],
-            predicted_temperature_k=prediction.predicted_temperature,
+            predicted_temperature_k=prediction.trajectory[0].predicted_temperature,
             predicted_power=prediction.predicted_power,
             cost_per_step=cost_per_step,
             cumulative_cost_dkk=cumulative_cost_dkk
@@ -443,7 +399,7 @@ def main():
 
         print_step_info(
             step_counter=step_counter,
-            action=prediction.action,
+            action=prediction.trajectory[0].action,
             current_temp_celsius=kelvin_to_celsius(current_temperature_k),
             ambient_temp_celsius=ambient_temp_c,
             cost_per_step=cost_per_step,
@@ -451,15 +407,7 @@ def main():
         )
         
         # ===== PRINT TRAJECTORY DETAILS =====
-        trajectory_data = simulate_trajectory_with_prices(
-            controller=controller,
-            trajectory=prediction.trajectory,
-            initial_temp=current_temperature_k,
-            ambient_temp=ambient_temp_k,
-            future_prices=future_price_list,
-            steps_per_hour=steps_per_hour
-        )
-        print_trajectory_details(trajectory_data)
+        print_trajectory_details(prediction.trajectory)
 
         # ===== WAIT FOR NEXT STEP =====
         time.sleep(seconds_per_step)
@@ -468,7 +416,7 @@ def main():
         prev_temperature_k = current_temperature_k
         next_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
         next_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
-        controller.update_model(prev_temperature_k, prediction.action, next_temperature_k, next_ambient_temp_k)
+        controller.update_model(prev_temperature_k, prediction.trajectory[0].action, next_temperature_k, next_ambient_temp_k)
         
         step_counter += 1
 

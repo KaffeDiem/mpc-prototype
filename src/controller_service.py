@@ -42,11 +42,17 @@ class Action(Enum):
 
 
 @dataclass
-class ControllerServiceResult:
+class TrajectoryStep:
     action: Action
-    predicted_temperature: float
+    predicted_temperature: float  # Kelvin
+    predicted_cost: float  # DKK for this step
+    price: float  # DKK/kWh for this step
+
+
+@dataclass
+class ControllerServiceResult:
     predicted_power: float
-    trajectory: list[Action]
+    trajectory: list[TrajectoryStep]
 
 
 class ControllerService:
@@ -132,11 +138,18 @@ class ControllerService:
 
         actions = [Action.ON if a > 0.5 else Action.OFF for a in result.x]
 
+        # Build detailed trajectory with temperature and cost predictions
+        trajectory = self._build_trajectory_with_details(
+            actions=actions,
+            initial_temp=current_temp,
+            ambient_temp=ambient_temp,
+            future_prices=future_prices,
+            watts_on=watts_on
+        )
+
         return ControllerServiceResult(
-            actions[0],
-            self._predict_future_temperature(actions[0], current_temp, ambient_temp),
-            watts_on if actions[0] == Action.ON else 0.0,
-            actions,
+            predicted_power=watts_on if actions[0] == Action.ON else 0.0,
+            trajectory=trajectory,
         )
     
 
@@ -259,6 +272,61 @@ class ControllerService:
     def plot(self, save_path: str):
         # Implement plotting logic for visualizing predictions
         pass
+
+    def _build_trajectory_with_details(
+        self,
+        actions: list[Action],
+        initial_temp: float,
+        ambient_temp: float,
+        future_prices: list[float],
+        watts_on: float
+    ) -> list[TrajectoryStep]:
+        """
+        Build a detailed trajectory with temperature, cost, and price for each step.
+
+        Args:
+            actions: Sequence of actions to simulate
+            initial_temp: Starting temperature (Kelvin)
+            ambient_temp: Ambient temperature (Kelvin)
+            future_prices: List of hourly prices (DKK/kWh)
+            watts_on: Power consumption when ON (watts)
+
+        Returns:
+            List of TrajectoryStep objects with detailed predictions
+        """
+        trajectory = []
+        current_temp = initial_temp
+
+        for step_idx, action in enumerate(actions):
+            # Get price for this step (hourly prices)
+            hour_idx = step_idx // self.config.steps_per_hour
+            if hour_idx < len(future_prices):
+                price = future_prices[hour_idx]
+            else:
+                price = future_prices[-1] if future_prices else 0.0
+
+            # Predict next temperature
+            next_temp = self._predict_future_temperature(action, current_temp, ambient_temp)
+
+            # Calculate cost for this step
+            if action == Action.ON:
+                energy_kwh = (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
+                cost = energy_kwh * price
+            else:
+                cost = 0.0
+
+            # Store trajectory step
+            trajectory.append(TrajectoryStep(
+                action=action,
+                predicted_temperature=next_temp,
+                predicted_cost=cost,
+                price=price
+            ))
+
+            # Update for next iteration
+            current_temp = next_temp
+
+        return trajectory
 
     def _price_for_sequence(
         self,

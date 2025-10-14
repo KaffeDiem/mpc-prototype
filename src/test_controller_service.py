@@ -30,7 +30,7 @@ class TestControllerService(unittest.TestCase):
             ambient_temp=20.0,
             watts_on=1000.0,
         )
-        self.assertEqual(result.action, Action.OFF)
+        self.assertEqual(result.trajectory[0].action, Action.OFF)
     
     def test_controller_heats_when_below_temp_min(self):
         initial_measurements = ThermalSystemParams(
@@ -50,7 +50,30 @@ class TestControllerService(unittest.TestCase):
             ambient_temp=20.0,
             watts_on=1000.0,
         )
-        self.assertEqual(result.action, Action.ON, f"Expected ON, got {result.action}")
+        self.assertEqual(result.trajectory[0].action, Action.ON, f"Expected ON, got {result.trajectory[0].action}")
+
+    def test_controller_trajectory_not_outside_bounds(self):
+        initial_measurements = ThermalSystemParams(
+            heating_rate_k_per_step=2.0,
+            cooling_coefficient=0.04,
+            ambient_temp_k=20.0,
+        )
+        config = ControllerServiceConfig(
+            temp_min=20.0,
+            temp_max=22.0,
+            steps_per_hour=1,
+        )
+        controller = ControllerService(initial_measurements=initial_measurements, config=config)
+        result = controller.get_next_action(
+            current_temp=21.0,
+            future_prices=[0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0, 0.1, 1.0],
+            ambient_temp=20.0,
+            watts_on=1000.0,
+        )
+
+        for step in result.trajectory:
+            self.assertGreaterEqual(step.predicted_temperature, config.temp_min)
+            self.assertLessEqual(step.predicted_temperature, config.temp_max)
 
 
 if __name__ == "__main__":
