@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+# Large soft-constraint penalty scale (applied per-step, grows with violation distance)
+PENALTY_SCALE = 1e6
+
 def celsius_to_kelvin(celsius: float) -> float:
     return celsius + 273.15
 
@@ -25,34 +28,6 @@ class ThermalSystemParams:
     cooling_coefficient: float  # Cooling rate coefficient (fraction of temp difference lost per step)
     ambient_temp_k: float  # Ambient temperature (Kelvin)
 
-    @classmethod
-    def water_heater(
-        cls,
-        heating_rate_k_per_step: float = 0.5,  # Slow heating (high thermal mass)
-        cooling_coefficient: float = 0.02,  # Slow cooling (well insulated)
-        ambient_temp_celsius: float = 20.0,
-    ) -> "ThermalSystemParams":
-        """Factory method for water heater systems (high thermal mass, slow response)"""
-        return cls(
-            heating_rate_k_per_step=heating_rate_k_per_step,
-            cooling_coefficient=cooling_coefficient,
-            ambient_temp_k=celsius_to_kelvin(ambient_temp_celsius),
-        )
-
-    @classmethod
-    def electric_radiator(
-        cls,
-        heating_rate_k_per_step: float = 2.0,  # Fast heating (low thermal mass)
-        cooling_coefficient: float = 0.1,  # Fast cooling (designed to dissipate heat)
-        ambient_temp_celsius: float = 20.0,
-    ) -> "ThermalSystemParams":
-        """Factory method for electric radiator systems (low thermal mass, fast response)"""
-        return cls(
-            heating_rate_k_per_step=heating_rate_k_per_step,
-            cooling_coefficient=cooling_coefficient,
-            ambient_temp_k=celsius_to_kelvin(ambient_temp_celsius),
-        )
-
 
 @dataclass
 class ControllerServiceInitialMeasurements:
@@ -61,9 +36,9 @@ class ControllerServiceInitialMeasurements:
 
 @dataclass
 class ControllerServiceConfig:
-    temp_min: float
-    temp_max: float
-    steps_per_hour: int
+    temp_min: float  
+    temp_max: float 
+    steps_per_hour: int 
 
 
 class Action(Enum):
@@ -82,10 +57,10 @@ class ControllerServiceResult:
 class ControllerService:
     def __init__(
         self,
-        initial_measurements: ControllerServiceInitialMeasurements,
+        initial_measurements: ThermalSystemParams,
         config: ControllerServiceConfig,
     ):
-        self.thermal_system = initial_measurements.thermal_system
+        self.thermal_system = initial_measurements
         self.config = config
 
         # RLS adaptive learning state
@@ -117,104 +92,50 @@ class ControllerService:
         watts_on: float,
     ) -> ControllerServiceResult:
         """
-        Determine the next action (ON/OFF) for the system using MPC optimization.
-        The optimization handles temperature constraints internally.
-        """
-        # Emergency override: if currently violating constraints, force corrective action
-        if current_temp < self.config.temp_min:
-            # Force heater ON if below minimum temperature
-            predicted_temp = self._predict_future_temperature(Action.ON, current_temp, ambient_temp)
-            return ControllerServiceResult(
-                action=Action.ON,
-                predicted_temperature=predicted_temp,
-                predicted_power=watts_on,
-                trajectory=[Action.ON] * 96  # Placeholder trajectory
-            )
-        elif current_temp > self.config.temp_max:
-            # Force heater OFF if above maximum temperature
-            predicted_temp = self._predict_future_temperature(Action.OFF, current_temp, ambient_temp)
-            return ControllerServiceResult(
-                action=Action.OFF,
-                predicted_temperature=predicted_temp,
-                predicted_power=0.0,
-                trajectory=[Action.OFF] * 96  # Placeholder trajectory
-            )
-        
-        result = self._minimize_cost(
-            future_prices, ambient_temp, watts_on, current_temp
-        )
-        return result
-
-    def _minimize_cost(
-        self,
-        future_prices: list[float],
-        ambient_temp: float,
-        watts_on: float,
-        current_temp: float,
-    ) -> ControllerServiceResult:
-        """
-        Optimize the action sequence to minimize cost over the prediction horizon.
-        Uses hard constraints to strictly enforce temperature bounds.
+        Determine the next action (ON/OFF) for the system using MPC optimization with
+        soft temperature constraints enforced via large penalties in the objective.
         """
 
         def objective(actions: np.ndarray) -> float:
-            # Convert to action sequence
-            action_sequence = [Action.ON if a >= 0.5 else Action.OFF for a in actions]
+            # Evaluate using discrete actions to match returned trajectory
+            discrete_sequence = [Action.ON if a > 0.5 else Action.OFF for a in actions]
 
-            # Calculate electricity cost (no penalty terms needed with hard constraints)
-            sequence_price = self._price_for_sequence(
+            # Price cost using helper for consistency
+            total_cost = self._price_for_sequence(
                 future_prices=future_prices,
-                sequence=action_sequence,
+                sequence=discrete_sequence,
                 watts_on=watts_on,
             )
 
-            # Calculate the future temperature trajectory. If they are outside the bounds, return a large penalty
-            # The penalty should be extremely large and increasing as the temperature moves further outside the bounds.
-            # This makes sure that the optimizer will never choose an action that will move the temperature further outside the bounds.
-            temp_trajectory = self._simulate_temperature_trajectory(
-                action_sequence, current_temp, ambient_temp
-            )
-            
-            # Calculate penalty for constraint violations
-            penalty = 0.0
-            for temp in temp_trajectory:
+            # Temperature penalties using step-by-step simulation
+            temp = current_temp
+            for act in discrete_sequence:
+                temp = self._predict_future_temperature(act, temp, ambient_temp)
                 if temp < self.config.temp_min:
-                    # Exponential penalty for being below minimum
                     violation = self.config.temp_min - temp
-                    penalty += 1e6 * (violation ** 2)  # Quadratic scaling for smooth gradient
+                    total_cost += PENALTY_SCALE * (violation ** 3)
                 elif temp > self.config.temp_max:
-                    # Exponential penalty for being above maximum
                     violation = temp - self.config.temp_max
-                    penalty += 1e6 * (violation ** 2)  # Quadratic scaling for smooth gradient
+                    total_cost += PENALTY_SCALE * (violation ** 3)
 
-            return sequence_price + penalty
+            return total_cost
 
         # Limit optimization horizon (max 24 hours look-ahead) 
         optimization_horizon_hours = min(24, len(future_prices))
         optimization_steps = optimization_horizon_hours * self.config.steps_per_hour
 
-        # Create temperature-aware initial guess
-        x0 = self._create_initial_guess(
-            current_temp=current_temp,
-            ambient_temp=ambient_temp,
-            future_prices=future_prices,
-            optimization_horizon_hours=optimization_horizon_hours
-        )
+        x0 = [0.5] * optimization_steps
 
-        # Ensure x0 has correct length
-        assert(len(x0) == optimization_steps)
-
-        # Optimize action sequence with hard constraints
-        # Note: pyright has strict typing for scipy.optimize.minimize constraints parameter
-        result = minimize(  # type: ignore[call-overload]
+        # Optimize action sequence using L-BFGS-B (good for bounded problems)
+        result = minimize(
             fun=objective,
             x0=x0,
             bounds=[(0, 1)] * len(x0),
-            method='SLSQP',  # Required for constraints
-            options={'disp': False, 'maxiter': 200}  # Increased iterations for constrained optimization
+            method='L-BFGS-B',  # type: ignore
+            options={'maxiter': 200}  # type: ignore
         )
 
-        actions = [Action.ON if a >= 0.5 else Action.OFF for a in result.x]
+        actions = [Action.ON if a > 0.5 else Action.OFF for a in result.x]
 
         return ControllerServiceResult(
             actions[0],
@@ -223,74 +144,6 @@ class ControllerService:
             actions,
         )
     
-    def _create_initial_guess(
-        self,
-        current_temp: float,
-        ambient_temp: float,
-        future_prices: list[float],
-        optimization_horizon_hours: int
-    ) -> list[float]:
-        """
-        Create a temperature-aware initial guess for the optimizer.
-        If temperature is out of bounds, prioritize corrective action.
-        Otherwise, use price-based heuristic.
-        """
-        x0 = []
-        
-        # Calculate how many steps needed to recover if out of bounds
-        temp_margin_min = current_temp - self.config.temp_min
-        temp_margin_max = self.config.temp_max - current_temp
-        
-        # If below minimum, initialize with ON actions until recovery expected
-        if temp_margin_min < 0:
-            # Estimate steps needed to recover
-            net_heating_rate = self.thermal_system.heating_rate_k_per_step - \
-                              self.thermal_system.cooling_coefficient * (current_temp - ambient_temp)
-            steps_to_recover = max(1, int(np.ceil(abs(temp_margin_min) / max(net_heating_rate, 0.1))))
-            
-            for hour_idx in range(optimization_horizon_hours):
-                for step_in_hour in range(self.config.steps_per_hour):
-                    total_step = hour_idx * self.config.steps_per_hour + step_in_hour
-                    if total_step < steps_to_recover:
-                        x0.append(1.0)  # ON to recover
-                    else:
-                        # After recovery, use price-based logic
-                        if hour_idx < len(future_prices):
-                            avg_price = sum(future_prices[:optimization_horizon_hours]) / optimization_horizon_hours
-                            x0.append(1.0 if future_prices[hour_idx] < avg_price else 0.0)
-                        else:
-                            x0.append(0.0)
-        
-        # If above maximum, initialize with OFF actions until recovery expected
-        elif temp_margin_max < 0:
-            # Estimate steps needed to cool down
-            net_cooling_rate = abs(self.thermal_system.cooling_coefficient * (current_temp - ambient_temp))
-            steps_to_recover = max(1, int(np.ceil(abs(temp_margin_max) / max(net_cooling_rate, 0.1))))
-            
-            for hour_idx in range(optimization_horizon_hours):
-                for step_in_hour in range(self.config.steps_per_hour):
-                    total_step = hour_idx * self.config.steps_per_hour + step_in_hour
-                    if total_step < steps_to_recover:
-                        x0.append(0.0)  # OFF to cool down
-                    else:
-                        # After recovery, use price-based logic
-                        if hour_idx < len(future_prices):
-                            avg_price = sum(future_prices[:optimization_horizon_hours]) / optimization_horizon_hours
-                            x0.append(1.0 if future_prices[hour_idx] < avg_price else 0.0)
-                        else:
-                            x0.append(0.0)
-        
-        # If within bounds, use price-based initialization
-        else:
-            avg_price = sum(future_prices[:optimization_horizon_hours]) / optimization_horizon_hours if optimization_horizon_hours > 0 else 1.0
-            for hour_idx in range(optimization_horizon_hours):
-                for _ in range(self.config.steps_per_hour):
-                    if hour_idx < len(future_prices):
-                        # Turn on more likely if price is below average
-                        initial_action = 1.0 if future_prices[hour_idx] < avg_price else 0.0
-                        x0.append(initial_action)
-        
-        return x0
 
     def _predict_future_temperature(
         self, action: Action, current_temp: float, ambient_temp: float

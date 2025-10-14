@@ -1,0 +1,33 @@
+---
+alwaysApply: true
+description: Use uv for all Python commands and package management
+---
+
+# Python Command Execution
+
+This project uses `uv` as the Python package manager and command runner.
+
+## Required Command Format
+
+- **Running Python scripts**: Use `uv run python script.py` instead of `python script.py`
+- **Running tests**: Use `uv run pytest` instead of `pytest` or `python -m pytest`
+- **Installing packages**: Use `uv add package-name` instead of `pip install package-name`
+- **Running any Python command**: Prefix with `uv run` (e.g., `uv run python -m module`)
+
+## Examples
+
+```bash
+# Correct
+uv run pytest src/test_controller_service.py -v
+uv run python src/main.py
+uv add numpy
+
+# Incorrect
+python src/main.py
+pytest src/test_controller_service.py
+pip install numpy
+```
+
+## Why uv?
+
+`uv` is a fast Python package installer and resolver that manages the project's virtual environment and dependencies automatically based on [pyproject.toml](mdc:pyproject.toml) and [uv.lock](mdc:uv.lock).

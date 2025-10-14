@@ -313,8 +313,6 @@ def print_trajectory_details(trajectory_data: list[tuple[Action, float, float]])
 def print_step_info(
     step_counter: int,
     action: Action,
-    actions: list[Action],
-    prices: list[float],
     current_temp_celsius: float,
     ambient_temp_celsius: float,
     cost_per_step: float,
@@ -328,8 +326,6 @@ def print_step_info(
     print(f"Ambient temperature: {ambient_temp_celsius}")
     print(f"Cost this step: {cost_per_step:.4f} DKK")
     print(f"Cumulative cost: {cumulative_cost_dkk:.2f} DKK")
-    print(f"Future actions: {', '.join([action.name for action in actions])}")
-    print(f"Future prices: {', '.join([str(price) for price in prices])}")
 
 
 # ============================================================================
@@ -450,8 +446,6 @@ def main():
         print_step_info(
             step_counter=step_counter,
             action=prediction.action,
-            actions=prediction.trajectory,
-            prices=future_price_list,
             current_temp_celsius=kelvin_to_celsius(current_temperature_k),
             ambient_temp_celsius=ambient_temp_c,
             cost_per_step=cost_per_step,
