@@ -117,21 +117,13 @@ class ControllerService:
         watts_on: float,
     ) -> ControllerServiceResult:
         """
-        Determine the next action (ON/OFF) for the system
+        Determine the next action (ON/OFF) for the system using MPC optimization.
+        The optimization handles temperature constraints internally.
         """
-        if current_temp <= self.config.temp_min:
-            return ControllerServiceResult(
-                Action.ON, current_temp + 5, watts_on, [Action.ON]
-            )
-        elif current_temp > self.config.temp_max:
-            return ControllerServiceResult(
-                Action.OFF, current_temp - 5, 0.0, [Action.OFF]
-            )
-        else:
-            result = self._minimize_cost(
-                future_prices, ambient_temp, watts_on, current_temp
-            )
-            return result
+        result = self._minimize_cost(
+            future_prices, ambient_temp, watts_on, current_temp
+        )
+        return result
 
     def _minimize_cost(
         self,

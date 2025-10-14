@@ -314,7 +314,7 @@ def main():
     )
     
     # Perform initial measurements
-    watts_on = perform_initial_measurements(smart_plug_service)
+    expected_watts_on = perform_initial_measurements(smart_plug_service)
 
     # Initialize control loop state
     step_counter = 0
@@ -324,6 +324,7 @@ def main():
 
     # Main control loop
     while True:
+        # ===== FETCH PRICES =====
         # Fetch prices if needed
         if should_refetch_prices(last_price_fetch_time, prices, MIN_FUTURE_HOURS):
             print("Fetching updated electricity prices...")
@@ -337,42 +338,47 @@ def main():
             time.sleep(seconds_per_step)
             continue
 
-        # Prepare data for controller
-        future_price_list = prepare_future_prices(prices, steps_per_hour)
+        # ===== MEASURE CURRENT STATE =====
         current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
         ambient_temp_c = weather_service.get_current_temperature()
+        ambient_temp_k = celsius_to_kelvin(ambient_temp_c)
+        future_price_list = prepare_future_prices(prices, steps_per_hour)
+        current_spot_price = get_current_spot_price(prices)
 
-        # Get next action from controller
+        # ===== PREDICT NEXT ACTION =====
+        # Use expected_watts_on for prediction to ensure predicted_power matches the action
         prediction = controller.get_next_action(
             current_temp=current_temperature_k,
             future_prices=future_price_list,
-            ambient_temp=celsius_to_kelvin(ambient_temp_c),
-            watts_on=watts_on
+            ambient_temp=ambient_temp_k,
+            watts_on=expected_watts_on
         )
 
-        # Get current spot price
-        current_spot_price = get_current_spot_price(prices)
+        # ===== EXECUTE ACTION =====
+        actual_watts = execute_action_and_update_watts(prediction.action, smart_plug_service)
         
-        # Calculate cost for this step
+        # Update expected watts if actual measurement differs significantly (>10%)
+        if abs(actual_watts - expected_watts_on) / max(expected_watts_on, 1.0) > 0.10:
+            logging.info(f"Updating expected watts: {expected_watts_on:.1f}W -> {actual_watts:.1f}W")
+            expected_watts_on = actual_watts
+        
+        # ===== CALCULATE COSTS =====
         cost_per_step = calculate_step_cost(
             prediction.action,
-            watts_on,
+            expected_watts_on,  # Use expected watts for cost calculation
             current_spot_price,
             seconds_per_step
         )
         cumulative_cost_dkk += cost_per_step
         
-        # Execute action and update watts
-        watts_on = execute_action_and_update_watts(prediction.action, smart_plug_service)
-        
-        # Log stats to CSV
+        # ===== LOG DATA =====
         log_step_to_csv(
             csv_writer=csv_writer,
             step_counter=step_counter,
             current_temperature_k=current_temperature_k,
             ambient_temp_c=ambient_temp_c,
             action=prediction.action,
-            watts_on=watts_on,
+            watts_on=actual_watts,  # Log actual measured watts
             current_spot_price=current_spot_price,
             heating_rate=controller.theta[0],
             cooling_coeff=controller.theta[1],
@@ -382,7 +388,6 @@ def main():
             cumulative_cost_dkk=cumulative_cost_dkk
         )
 
-        # Print step information
         print_step_info(
             step_counter=step_counter,
             action=prediction.action,
@@ -392,14 +397,14 @@ def main():
             cumulative_cost_dkk=cumulative_cost_dkk
         )
 
-        # Wait for next step
+        # ===== WAIT FOR NEXT STEP =====
         time.sleep(seconds_per_step)
         
-        # Update model with observed temperature change (for adaptive learning)
+        # ===== UPDATE ADAPTIVE MODEL =====
         prev_temperature_k = current_temperature_k
-        current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
-        current_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
-        controller.update_model(prev_temperature_k, prediction.action, current_temperature_k, current_ambient_temp_k)
+        next_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
+        next_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
+        controller.update_model(prev_temperature_k, prediction.action, next_temperature_k, next_ambient_temp_k)
         
         step_counter += 1
 
