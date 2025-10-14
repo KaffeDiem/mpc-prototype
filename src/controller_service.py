@@ -1,16 +1,9 @@
 from typing import Any
 from dataclasses import dataclass
 from enum import Enum
-from scipy.optimize import minimize
-import matplotlib.pyplot as plt
+from scipy.optimize import differential_evolution
 import numpy as np
 
-
-# Large soft-constraint penalty scale (applied per-step, grows with violation distance)
-PENALTY_SCALE = 1e6
-# Small regularizer to encourage binary actions (0 or 1) during continuous optimization
-# The term a*(1-a) is 0 at a∈{0,1} and maximal at a=0.5
-BINARY_REG_SCALE = 1e-1
 
 def celsius_to_kelvin(celsius: float) -> float:
     return celsius + 273.15
@@ -101,42 +94,23 @@ class ControllerService:
         """
 
         def objective(actions: np.ndarray) -> float:
-            """Continuous, differentiable objective for SciPy optimizers.
+            TEMP_VIOLATION_PENALTY = 1_000
 
-            - Actions are continuous in [0, 1] and represent duty cycle this step.
-            - Dynamics use fractional heating proportional to action level.
-            - Costs scale linearly with action level.
-            - Temperature bounds enforced via large soft penalties.
-            - Binary regularizer encourages actions near 0 or 1.
-            """
-            total_cost = 0.0
+            temperature = current_temp
+            cost = 0.0
+            for i, action in enumerate(actions):
+                action = Action.ON if action > 0.5 else Action.OFF
+                temperature = self._predict_future_temperature(action, temperature, ambient_temp)
+                cost += future_prices[i] * watts_on / 1000.0
 
-            # Energy/cost term (per-step, using hourly prices expanded internally)
-            steps_per_hour = self.config.steps_per_hour
-            for idx, a in enumerate(actions):
-                hour = idx // steps_per_hour
-                price = future_prices[hour] if hour < len(future_prices) else future_prices[-1] if future_prices else 0.0
-                # energy_kwh for this step at action level a
-                energy_kwh = (watts_on / 1000.0) * (1.0 / steps_per_hour) * float(a)
-                total_cost += energy_kwh * price
+                if temperature < self.config.temp_min:
+                    penalty = TEMP_VIOLATION_PENALTY * (self.config.temp_min - temperature) ** 3
+                    cost += penalty
+                if temperature > self.config.temp_max:
+                    penalty = TEMP_VIOLATION_PENALTY * (temperature - self.config.temp_max) ** 3
+                    cost += penalty
 
-            # Temperature penalty by simulating with fractional actions
-            temp = current_temp
-            for a in actions:
-                temp = self._predict_future_temperature_continuous(float(a), temp, ambient_temp)
-                below_violation = max(0.0, self.config.temp_min - temp)
-                above_violation = max(0.0, temp - self.config.temp_max)
-                if below_violation > 0.0:
-                    total_cost += PENALTY_SCALE * (below_violation ** 3)
-                if above_violation > 0.0:
-                    total_cost += PENALTY_SCALE * (above_violation ** 3)
-
-            # Encourage binary actions (0 or 1)
-            # Sum a*(1-a) over the horizon; scale kept modest relative to monetary costs
-            binary_reg = float(np.sum(actions * (1.0 - actions)))
-            total_cost += BINARY_REG_SCALE * binary_reg
-
-            return float(total_cost)
+            return cost
 
         # Limit optimization horizon (max 24 hours look-ahead) 
         optimization_horizon_hours = min(24, len(future_prices))
@@ -144,57 +118,10 @@ class ControllerService:
 
         x0 = np.full(optimization_steps, 0.5)
 
-        # Optimize with SciPy (bounded continuous variables)
-        # Build nonlinear inequality constraints to keep temps within bounds at each step
-        # For SLSQP: c(x) >= 0
-        def make_step_violation_low(k: int):
-            def fun(actions: np.ndarray) -> float:
-                temp = current_temp
-                for i in range(k + 1):
-                    a = float(actions[i])
-                    temp = self._predict_future_temperature_continuous(a, temp, ambient_temp)
-                return temp - self.config.temp_min
-            return fun
+        bounds = [(0, 1)] * optimization_steps
+        result = differential_evolution(objective, bounds, maxiter=5000, polish=False)
 
-        def make_step_violation_high(k: int):
-            def fun(actions: np.ndarray) -> float:
-                temp = current_temp
-                for i in range(k + 1):
-                    a = float(actions[i])
-                    temp = self._predict_future_temperature_continuous(a, temp, ambient_temp)
-                return self.config.temp_max - temp
-            return fun
-
-        constraints: list[dict[str, Any]] = []
-        for k in range(optimization_steps):
-            constraints.append({"type": "ineq", "fun": make_step_violation_low(k)})
-            constraints.append({"type": "ineq", "fun": make_step_violation_high(k)})
-
-        result = minimize(
-            fun=objective,
-            x0=x0,
-            bounds=[(0.0, 1.0)] * len(x0),
-            method="SLSQP",  # differentiable, respects bounds
-            constraints=constraints,  # type: ignore
-            options={"maxiter": 300},  # type: ignore
-        )
-
-        optimized_actions = np.clip(result.x, 0.0, 1.0)
-
-        # Discretize actions for execution/reporting with stepwise constraint enforcement
-        actions: list[Action] = []
-        sim_temp = current_temp
-        for idx, a in enumerate(optimized_actions):
-            proposed = Action.ON if a >= 0.5 else Action.OFF
-            next_temp = self._predict_future_temperature(proposed, sim_temp, ambient_temp)
-            if next_temp < self.config.temp_min:
-                proposed = Action.ON
-                next_temp = self._predict_future_temperature(proposed, sim_temp, ambient_temp)
-            elif next_temp > self.config.temp_max:
-                proposed = Action.OFF
-                next_temp = self._predict_future_temperature(proposed, sim_temp, ambient_temp)
-            actions.append(proposed)
-            sim_temp = next_temp
+        actions = [Action.ON if action > 0.5 else Action.OFF for action in result.x]
 
         # Build detailed trajectory with temperature and cost predictions
         trajectory = self._build_trajectory_with_details(
@@ -235,19 +162,6 @@ class ControllerService:
         # Total temperature change
         delta_temp = heating_delta + cooling_delta
 
-        return current_temp + delta_temp
-
-    def _predict_future_temperature_continuous(
-        self, action_level: float, current_temp: float, ambient_temp: float
-    ) -> float:
-        """Like _predict_future_temperature but with fractional heating.
-
-        action_level ∈ [0, 1] scales the heating contribution linearly.
-        """
-        temp_diff = current_temp - ambient_temp
-        cooling_delta = -self.thermal_system.cooling_coefficient * temp_diff
-        heating_delta = self.thermal_system.heating_rate_k_per_step * max(0.0, min(1.0, action_level))
-        delta_temp = heating_delta + cooling_delta
         return current_temp + delta_temp
 
     def _simulate_temperature_trajectory(
@@ -398,24 +312,3 @@ class ControllerService:
             current_temp = next_temp
 
         return trajectory
-
-    def _price_for_sequence(
-        self,
-        future_prices: list[float],
-        sequence: list[Action],
-        watts_on: float,
-    ) -> float:
-        """Cost for a discrete ON/OFF sequence over a horizon with hourly prices."""
-
-        total_cost = 0.0
-        steps_per_hour = self.config.steps_per_hour
-        for idx, action in enumerate(sequence):
-            hour = idx // steps_per_hour
-            if hour < len(future_prices):
-                price = future_prices[hour]
-            else:
-                price = future_prices[-1] if future_prices else 0.0
-            if action == Action.ON:
-                total_cost += (watts_on / 1000.0) * price / steps_per_hour
-
-        return total_cost
