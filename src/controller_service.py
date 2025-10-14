@@ -101,7 +101,8 @@ class ControllerService:
             for i, action in enumerate(actions):
                 action = Action.ON if action > 0.5 else Action.OFF
                 temperature = self._predict_future_temperature(action, temperature, ambient_temp)
-                cost += future_prices[i] * watts_on / 1000.0
+                price_index = i // self.config.steps_per_hour
+                cost += future_prices[price_index] * watts_on / 1000.0
 
                 if temperature < self.config.temp_min:
                     penalty = TEMP_VIOLATION_PENALTY * (self.config.temp_min - temperature) ** 3
