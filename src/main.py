@@ -279,7 +279,7 @@ def main():
         weather_service=weather_service,
         steps_per_hour=steps_per_hour,
         temp_min_celsius=20.0,
-        temp_max_celsius=22.0
+        temp_max_celsius=24.0
     )
     
     # Perform initial measurements
