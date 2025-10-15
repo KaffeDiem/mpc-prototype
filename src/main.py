@@ -52,8 +52,8 @@ def initialize_controller(
     """Initialize the controller with thermal system parameters and config."""
     current_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
     thermal_system = ThermalSystemParams(
-        heating_rate_k_per_step=1.5,
-        cooling_coefficient=0.04,
+        heating_rate_k_per_step=0.5,
+        cooling_coefficient=0.02,
         ambient_temp_k=current_ambient_temp_k,
     )
     config = ControllerServiceConfig(
@@ -89,22 +89,6 @@ def perform_initial_measurements(smart_plug_service: SmartPlugService) -> float:
 # Price Management Functions
 # ============================================================================
 
-def should_refetch_prices(
-    last_fetch_time: float,
-    prices: list[Price],
-    min_future_hours: int
-) -> bool:
-    """Determine if prices should be refetched."""
-    current_time = time.time()
-    now = datetime.now()
-    
-    # Filter to get only future prices
-    future_prices = [p for p in prices if p.date >= now.replace(minute=0, second=0, microsecond=0)]
-    
-    # Refetch if it's been an hour, or if we have fewer than min_future_hours of future prices
-    return (current_time - last_fetch_time >= 3600) or (len(future_prices) < min_future_hours)
-
-
 def fetch_prices(
     price_service: PricesService,
     today: date,
@@ -120,43 +104,16 @@ def fetch_prices(
         return prices
     except Exception as e:
         logging.error(f"Failed to fetch prices: {e}")
-        # Create default Price objects for the next 48 hours
-        now = datetime.now()
-        default_prices = [Price(date=now + timedelta(hours=i), price=1.0) for i in range(48)]
-        print("Using default prices due to fetch failure")
-        return default_prices
-
-
-def get_current_spot_price(prices: list[Price]) -> float:
-    """
-    Get the current spot price by filtering out all prices before the current hour.
-    Returns the first remaining price, or 1.0 as a default.
-    """
-    now = datetime.now()
-    current_hour = now.replace(minute=0, second=0, microsecond=0)
-    
-    # Filter out prices before current hour
-    remaining_prices = [p for p in prices if p.date >= current_hour]
-    
-    if remaining_prices:
-        return remaining_prices[0].price
-    else:
-        logging.warning("No prices available for current or future hours, using default")
-        return 1.0
+        return []
 
 
 def prepare_future_prices(prices: list[Price]) -> list[float]:
     """
     Filter future prices and return hourly values.
-    Controller will expand these per-step internally.
     """
     now = datetime.now()
     current_hour = now.replace(minute=0, second=0, microsecond=0)
-    
-    # Filter to get only future prices
     future_prices = [p for p in prices if p.date >= current_hour]
-    
-    # Extract just the hourly price values (no repetition)
     future_price_values = [p.price for p in future_prices]
     
     return future_price_values
@@ -198,7 +155,9 @@ def log_step_to_csv(
     cooling_coeff: float,
     predicted_temperature_k: float,
     predicted_power: float,
-    cost_per_step: float,
+    spot_price: float,
+    predicted_cost: float,
+    fcr_revenue: float,
     cumulative_cost_eur: float,
     fcr_d_down_price: float,
     fcr_d_up_price: float
@@ -216,7 +175,9 @@ def log_step_to_csv(
         cooling_coeff,
         kelvin_to_celsius(predicted_temperature_k),
         predicted_power,
-        cost_per_step,
+        spot_price,
+        predicted_cost,
+        fcr_revenue,
         cumulative_cost_eur,
         fcr_d_down_price,
         fcr_d_up_price
@@ -226,22 +187,6 @@ def log_step_to_csv(
 # ============================================================================
 # Control Logic Functions
 # ============================================================================
-
-def calculate_step_cost(
-    action: Action,
-    watts_on: float,
-    spot_price: float,
-    seconds_per_step: float
-) -> float:
-    """
-    Calculate the cost in EUR for a single step.
-    Energy consumed = (watts / 1000) * (seconds_per_step / 3600) in kWh
-    """
-    if action == Action.ON:
-        energy_kwh = (watts_on / 1000.0) * (seconds_per_step / 3600.0)
-        return energy_kwh * spot_price
-    return 0.0
-
 
 def execute_action_and_update_watts(
     action: Action,
@@ -261,12 +206,12 @@ def execute_action_and_update_watts(
 def print_trajectory_details(trajectory: list) -> None:
     """Print formatted trajectory showing action, temperature, price, and cost for each step."""
     print("\nPredicted Trajectory:")
-    print("Step | Action | Predicted Temp (°C) | Price (DKK/kWh) | Cost (DKK)")
+    print("Step | Action | Predicted Temp (°C) | Spot Price (EUR/kWh) | Cost (EUR) | FCR Revenue (EUR)")
     print("-" * 75)
     
     for step_idx, step in enumerate(trajectory):
         temp_celsius = kelvin_to_celsius(step.predicted_temperature)
-        print(f"{step_idx:4d} | {step.action.name:6s} | {temp_celsius:18.2f} | {step.price:15.2f} | {step.predicted_cost:11.4f}")
+        print(f"{step_idx:4d} | {step.action.name:6s} | {temp_celsius:18.2f} | {step.spot_price:15.2f} | {step.predicted_cost:11.4f} | {step.fcr_revenue:11.4f}")
 
 
 def print_step_info(
@@ -274,7 +219,9 @@ def print_step_info(
     action: Action,
     current_temp_celsius: float,
     ambient_temp_celsius: float,
-    cost_per_step: float,
+    spot_price: float,
+    predicted_cost: float,
+    fcr_revenue: float,
     cumulative_cost_eur: float,
     fcr_d_down_price: float,
     fcr_d_up_price: float
@@ -285,7 +232,9 @@ def print_step_info(
     print(f"Next action: {action}")
     print(f"Current temperature: {current_temp_celsius}")
     print(f"Ambient temperature: {ambient_temp_celsius}")
-    print(f"Cost this step: {cost_per_step:.4f} EUR")
+    print(f"Spot price: {spot_price:.4f} EUR")
+    print(f"Predicted cost: {predicted_cost:.4f} EUR")
+    print(f"FCR revenue: {fcr_revenue:.4f} EUR")
     print(f"Cumulative cost: {cumulative_cost_eur:.2f} EUR")
     print(f"FCR-D down price: {fcr_d_down_price:.4f} EUR")
     print(f"FCR-D up price: {fcr_d_up_price:.4f} EUR")
@@ -300,7 +249,6 @@ def main():
     # Configuration
     steps_per_hour = 4  # E.g. 4 == 15-minute intervals
     seconds_per_step = 3600 / steps_per_hour
-    MIN_FUTURE_HOURS = 12  # Refetch if we have less than this many hours of future prices
     
     # Setup CSV logging
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -338,23 +286,23 @@ def main():
     step_counter = 0
     cumulative_cost_eur = 0.0
     prices = []
-    last_price_fetch_time = 0  # Force initial fetch
     fcr_d_down_price, fcr_d_up_price = fcr_service.get_fcr_prices()
 
     # Main control loop
     while True:
         # ===== FETCH PRICES =====
-        # Fetch prices if needed
-        if should_refetch_prices(last_price_fetch_time, prices, MIN_FUTURE_HOURS):
-            print("Fetching updated electricity prices...")
-            today = date.today()
-            tomorrow = today + timedelta(days=1)
-            prices = fetch_prices(price_service, today, tomorrow)
-            last_price_fetch_time = time.time()
-            fcr_d_down_price, fcr_d_up_price = fcr_service.get_fcr_prices()
-        
-        if not prices:  # Safety check
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+        prices = fetch_prices(price_service, today, tomorrow)
+        fcr_d_down_price, fcr_d_up_price = fcr_service.get_fcr_prices()
+
+        if not prices or len(prices) == 0:
             logging.warning("No prices available, skipping this iteration")
+            time.sleep(seconds_per_step)
+            continue
+
+        if not fcr_d_down_price or not fcr_d_up_price:
+            logging.warning("No FCR prices available, skipping this iteration")
             time.sleep(seconds_per_step)
             continue
 
@@ -363,7 +311,6 @@ def main():
         ambient_temp_c = weather_service.get_current_temperature()
         ambient_temp_k = celsius_to_kelvin(ambient_temp_c)
         future_price_list = prepare_future_prices(prices)
-        current_spot_price = get_current_spot_price(prices)
 
         # ===== PREDICT NEXT ACTION =====
         # Use expected_watts_on for prediction to ensure predicted_power matches the action
@@ -385,13 +332,9 @@ def main():
             expected_watts_on = actual_watts
         
         # ===== CALCULATE COSTS =====
-        cost_per_step = calculate_step_cost(
-            prediction.trajectory[0].action,
-            expected_watts_on,  # Use expected watts for cost calculation
-            current_spot_price,
-            seconds_per_step
-        )
-        cumulative_cost_eur += cost_per_step
+        fcr_revenue = prediction.trajectory[0].fcr_revenue
+        predicted_cost = prediction.trajectory[0].predicted_cost
+        cumulative_cost_eur += predicted_cost - fcr_revenue
         
         # ===== LOG DATA =====
         log_step_to_csv(
@@ -401,12 +344,14 @@ def main():
             ambient_temp_c=ambient_temp_c,
             action=prediction.trajectory[0].action,
             watts_on=actual_watts,  # Log actual measured watts
-            current_spot_price=current_spot_price,
+            current_spot_price=prediction.trajectory[0].spot_price,
             heating_rate=controller.theta[0],
             cooling_coeff=controller.theta[1],
             predicted_temperature_k=prediction.trajectory[0].predicted_temperature,
             predicted_power=prediction.predicted_power,
-            cost_per_step=cost_per_step,
+            spot_price=prediction.trajectory[0].spot_price,
+            predicted_cost=prediction.trajectory[0].predicted_cost,
+            fcr_revenue=prediction.trajectory[0].fcr_revenue,
             cumulative_cost_eur=cumulative_cost_eur,
             fcr_d_down_price=fcr_d_down_price,
             fcr_d_up_price=fcr_d_up_price
@@ -417,7 +362,9 @@ def main():
             action=prediction.trajectory[0].action,
             current_temp_celsius=kelvin_to_celsius(current_temperature_k),
             ambient_temp_celsius=ambient_temp_c,
-            cost_per_step=cost_per_step,
+            spot_price=prediction.trajectory[0].spot_price,
+            predicted_cost=prediction.trajectory[0].predicted_cost,
+            fcr_revenue=prediction.trajectory[0].fcr_revenue,
             cumulative_cost_eur=cumulative_cost_eur,
             fcr_d_down_price=fcr_d_down_price,
             fcr_d_up_price=fcr_d_up_price

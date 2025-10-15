@@ -44,9 +44,8 @@ class TrajectoryStep:
     action: Action
     predicted_temperature: float  # Kelvin
     predicted_cost: float  # EUR for this step
-    price: float  # EUR/kWh for this step
+    spot_price: float  # EUR/kWh for this step
     fcr_revenue: float  # EUR for this step
-    net_cost: float  # EUR for this step (predicted_cost - fcr_revenue)
 
 
 @dataclass
@@ -425,9 +424,8 @@ class ControllerService:
                 action=action,
                 predicted_temperature=next_temp,
                 predicted_cost=cost,
-                price=price,
+                spot_price=price,
                 fcr_revenue=fcr_revenue,
-                net_cost=cost - fcr_revenue
             ))
 
             # Update for next iteration
