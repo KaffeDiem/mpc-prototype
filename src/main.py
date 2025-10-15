@@ -146,7 +146,6 @@ def setup_csv_file(timestamp: str) -> Tuple[TextIO, Any, str]:
         'predicted_next_temp_c',
         'predicted_cost_eur',
         'fcr_revenue_eur',
-        'cumulative_cost_eur',
         'fcr_d_down_price_eur',
         'fcr_d_up_price_eur'
     ])
@@ -167,7 +166,6 @@ def log_step_to_csv(
     spot_price: float,
     predicted_cost: float,
     fcr_revenue: float,
-    cumulative_cost_eur: float,
     fcr_d_down_price: float,
     fcr_d_up_price: float
 ) -> None:
@@ -185,7 +183,6 @@ def log_step_to_csv(
         kelvin_to_celsius(predicted_temperature_k),
         predicted_cost,
         fcr_revenue,
-        cumulative_cost_eur,
         fcr_d_down_price,
         fcr_d_up_price
     ])
@@ -204,6 +201,7 @@ def execute_action_and_update_watts(
     """
     if action == Action.ON:
         smart_plug_service.turn_on()
+        time.sleep(1)
         return smart_plug_service.get_status().power_watts
     else:
         smart_plug_service.turn_off()
@@ -229,7 +227,6 @@ def print_step_info(
     spot_price: float,
     predicted_cost: float,
     fcr_revenue: float,
-    cumulative_cost_eur: float,
     fcr_d_down_price: float,
     fcr_d_up_price: float
 ) -> None:
@@ -242,7 +239,6 @@ def print_step_info(
     print(f"Spot price: {spot_price:.4f} EUR")
     print(f"Predicted cost: {predicted_cost:.4f} EUR")
     print(f"FCR revenue: {fcr_revenue:.4f} EUR")
-    print(f"Cumulative cost: {cumulative_cost_eur:.2f} EUR")
     print(f"FCR-D down price: {fcr_d_down_price:.4f} EUR")
     print(f"FCR-D up price: {fcr_d_up_price:.4f} EUR")
 
@@ -291,7 +287,6 @@ def main():
 
     # Initialize control loop state
     step_counter = 0
-    cumulative_cost_eur = 0.0
     prices = []
     fcr_d_down_price, fcr_d_up_price = fcr_service.get_fcr_prices()
 
@@ -332,16 +327,11 @@ def main():
 
         # ===== EXECUTE ACTION =====
         actual_watts = execute_action_and_update_watts(prediction.trajectory[0].action, smart_plug_service)
-        
-        # Update expected watts if actual measurement differs significantly (>10%)
-        if abs(actual_watts - expected_watts_on) / max(expected_watts_on, 1.0) > 0.10:
-            logging.info(f"Updating expected watts: {expected_watts_on:.1f}W -> {actual_watts:.1f}W")
-            expected_watts_on = actual_watts
+        expected_watts_on = actual_watts
         
         # ===== CALCULATE COSTS =====
         fcr_revenue = prediction.trajectory[0].fcr_revenue
         predicted_cost = prediction.trajectory[0].predicted_cost
-        cumulative_cost_eur += predicted_cost - fcr_revenue
         
         # ===== LOG DATA =====
         log_step_to_csv(
@@ -357,7 +347,6 @@ def main():
             spot_price=prediction.trajectory[0].spot_price,
             predicted_cost=prediction.trajectory[0].predicted_cost,
             fcr_revenue=prediction.trajectory[0].fcr_revenue,
-            cumulative_cost_eur=cumulative_cost_eur,
             fcr_d_down_price=fcr_d_down_price,
             fcr_d_up_price=fcr_d_up_price
         )
@@ -370,7 +359,6 @@ def main():
             spot_price=prediction.trajectory[0].spot_price,
             predicted_cost=prediction.trajectory[0].predicted_cost,
             fcr_revenue=prediction.trajectory[0].fcr_revenue,
-            cumulative_cost_eur=cumulative_cost_eur,
             fcr_d_down_price=fcr_d_down_price,
             fcr_d_up_price=fcr_d_up_price
         )
