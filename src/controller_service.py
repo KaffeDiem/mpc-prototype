@@ -389,7 +389,7 @@ class ControllerService:
             actions: Sequence of actions to simulate
             initial_temp: Starting temperature (Kelvin)
             ambient_temp: Ambient temperature (Kelvin)
-            future_prices: List of hourly prices (DKK/kWh)
+            future_prices: List of hourly prices (EUR/kWh)
             watts_on: Power consumption when ON (watts)
 
         Returns:
@@ -414,10 +414,10 @@ class ControllerService:
             if action == Action.ON:
                 energy_kwh = (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
                 cost = energy_kwh * price
-                fcr_revenue = fcr_d_up_price * (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
+                fcr_revenue = fcr_d_down_price * (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
             else:
                 cost = 0.0
-                fcr_revenue = fcr_d_down_price * (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
+                fcr_revenue = fcr_d_up_price * (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
 
             # Store trajectory step
             trajectory.append(TrajectoryStep(
