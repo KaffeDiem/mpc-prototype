@@ -71,13 +71,13 @@ def perform_initial_measurements(smart_plug_service: SmartPlugService) -> float:
     turn_on_success = smart_plug_service.turn_on()
     if not turn_on_success:
         logging.warning("Failed to turn on plug during initialization. Using default watts value.")
-        return 1000.0  # Default fallback value
+        return 500.0  # Default fallback value
     
-    time.sleep(3)
+    time.sleep(1)
     watts_on = smart_plug_service.get_status().power_watts
     if watts_on == 0.0:
         logging.warning("Got 0W reading during initialization. Using default watts value.")
-        return 1000.0  # Default fallback value
+        return 500.0  # Default fallback value
     
     logging.info(f"Initial measurement: {watts_on}W when ON")
     return watts_on
