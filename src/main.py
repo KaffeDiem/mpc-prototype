@@ -21,6 +21,7 @@ from controller_service import (
     ControllerServiceConfig,
     ControllerService,
 )
+from fcr_service import FCRService
 
 # Set up logging to see any warnings about missing dates
 logging.basicConfig(
@@ -32,13 +33,14 @@ logging.basicConfig(
 # Service Initialization Functions
 # ============================================================================
 
-def initialize_services(region: Region) -> Tuple[PricesService, WeatherService, SmartPlugService, ThermometerService]:
+def initialize_services(region: Region) -> Tuple[PricesService, WeatherService, SmartPlugService, ThermometerService, FCRService]:
     """Initialize all required services."""
     price_service = PricesService(region=region)
     weather_service = WeatherService()
     smart_plug_service = SmartPlugService()
     thermometer_service = ThermometerService()
-    return price_service, weather_service, smart_plug_service, thermometer_service
+    fcr_service = FCRService()
+    return price_service, weather_service, smart_plug_service, thermometer_service, fcr_service
 
 
 def initialize_controller(
@@ -178,7 +180,7 @@ def setup_csv_file(timestamp: str) -> Tuple[TextIO, Any, str]:
         'timestamp', 'step', 'current_temp_c', 'ambient_temp_c', 
         'action', 'watts_on', 'spot_price', 'heating_rate', 
         'cooling_coeff', 'predicted_temp_c', 'predicted_power',
-        'cost_dkk_per_step', 'cumulative_cost_dkk'
+        'cost_eur_per_step', 'cumulative_cost_eur'
     ])
     
     return csv_file, csv_writer, csv_filename
@@ -197,7 +199,9 @@ def log_step_to_csv(
     predicted_temperature_k: float,
     predicted_power: float,
     cost_per_step: float,
-    cumulative_cost_dkk: float
+    cumulative_cost_eur: float,
+    fcr_d_down_price: float,
+    fcr_d_up_price: float
 ) -> None:
     """Log a single step's data to CSV."""
     csv_writer.writerow([
@@ -213,7 +217,9 @@ def log_step_to_csv(
         kelvin_to_celsius(predicted_temperature_k),
         predicted_power,
         cost_per_step,
-        cumulative_cost_dkk
+        cumulative_cost_eur,
+        fcr_d_down_price,
+        fcr_d_up_price
     ])
 
 
@@ -228,7 +234,7 @@ def calculate_step_cost(
     seconds_per_step: float
 ) -> float:
     """
-    Calculate the cost in DKK for a single step.
+    Calculate the cost in EUR for a single step.
     Energy consumed = (watts / 1000) * (seconds_per_step / 3600) in kWh
     """
     if action == Action.ON:
@@ -269,7 +275,9 @@ def print_step_info(
     current_temp_celsius: float,
     ambient_temp_celsius: float,
     cost_per_step: float,
-    cumulative_cost_dkk: float
+    cumulative_cost_eur: float,
+    fcr_d_down_price: float,
+    fcr_d_up_price: float
 ) -> None:
     """Print formatted information about the current step."""
     print("--------------------------------")
@@ -277,8 +285,10 @@ def print_step_info(
     print(f"Next action: {action}")
     print(f"Current temperature: {current_temp_celsius}")
     print(f"Ambient temperature: {ambient_temp_celsius}")
-    print(f"Cost this step: {cost_per_step:.4f} DKK")
-    print(f"Cumulative cost: {cumulative_cost_dkk:.2f} DKK")
+    print(f"Cost this step: {cost_per_step:.4f} EUR")
+    print(f"Cumulative cost: {cumulative_cost_eur:.2f} EUR")
+    print(f"FCR-D down price: {fcr_d_down_price:.4f} EUR")
+    print(f"FCR-D up price: {fcr_d_up_price:.4f} EUR")
 
 
 # ============================================================================
@@ -311,7 +321,7 @@ def main():
 
     # Initialize services for DK2 region (Copenhagen/East of Great Belt)
     # Use "DK1" for Aarhus/West of Great Belt
-    price_service, weather_service, smart_plug_service, thermometer_service = initialize_services("DK2")
+    price_service, weather_service, smart_plug_service, thermometer_service, fcr_service = initialize_services("DK2")
     
     # Initialize controller
     controller = initialize_controller(
@@ -329,6 +339,7 @@ def main():
     cumulative_cost_dkk = 0.0
     prices = []
     last_price_fetch_time = 0  # Force initial fetch
+    fcr_d_down_price, fcr_d_up_price = fcr_service.get_fcr_prices()
 
     # Main control loop
     while True:
@@ -340,6 +351,7 @@ def main():
             tomorrow = today + timedelta(days=1)
             prices = fetch_prices(price_service, today, tomorrow)
             last_price_fetch_time = time.time()
+            fcr_d_down_price, fcr_d_up_price = fcr_service.get_fcr_prices()
         
         if not prices:  # Safety check
             logging.warning("No prices available, skipping this iteration")
@@ -377,7 +389,7 @@ def main():
             current_spot_price,
             seconds_per_step
         )
-        cumulative_cost_dkk += cost_per_step
+        cumulative_cost_eur += cost_per_step
         
         # ===== LOG DATA =====
         log_step_to_csv(
@@ -393,7 +405,9 @@ def main():
             predicted_temperature_k=prediction.trajectory[0].predicted_temperature,
             predicted_power=prediction.predicted_power,
             cost_per_step=cost_per_step,
-            cumulative_cost_dkk=cumulative_cost_dkk
+            cumulative_cost_eur=cumulative_cost_eur,
+            fcr_d_down_price=fcr_d_down_price,
+            fcr_d_up_price=fcr_d_up_price
         )
 
         print_step_info(
@@ -402,7 +416,9 @@ def main():
             current_temp_celsius=kelvin_to_celsius(current_temperature_k),
             ambient_temp_celsius=ambient_temp_c,
             cost_per_step=cost_per_step,
-            cumulative_cost_dkk=cumulative_cost_dkk
+            cumulative_cost_eur=cumulative_cost_eur,
+            fcr_d_down_price=fcr_d_down_price,
+            fcr_d_up_price=fcr_d_up_price
         )
         
         # ===== PRINT TRAJECTORY DETAILS =====

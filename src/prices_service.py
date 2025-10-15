@@ -103,8 +103,8 @@ class PricesService():
             for entry in data:
                 # Parse the start time to get the date and hour
                 time_start = datetime.fromisoformat(entry['time_start'])
-                # Use DKK_per_kWh as the price
-                price = entry['DKK_per_kWh']
+                # Use EUR_per_kWh as the price
+                price = entry['EUR_per_kWh']
                 
                 prices.append(Price(
                     date=time_start.replace(tzinfo=None),
