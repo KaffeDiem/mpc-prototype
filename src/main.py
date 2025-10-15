@@ -296,7 +296,13 @@ def main():
         today = date.today()
         tomorrow = today + timedelta(days=1)
         prices = fetch_prices(price_service, today, tomorrow)
-        fcr_d_down_price, fcr_d_up_price = fcr_service.get_fcr_prices()
+
+        new_fcr_d_down_price, new_fcr_d_up_price = fcr_service.get_fcr_prices()
+        if new_fcr_d_down_price == 0 or new_fcr_d_up_price == 0:
+            logging.warning("No FCR prices available, skipping this iteration")
+        else:
+            fcr_d_down_price = new_fcr_d_down_price
+            fcr_d_up_price = new_fcr_d_up_price
 
         if not prices or len(prices) == 0:
             logging.warning("No prices available, skipping this iteration")
