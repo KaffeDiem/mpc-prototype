@@ -32,4 +32,4 @@ class FCRService:
                     fcr_d_down_prices = np.append(fcr_d_down_prices, r["PriceTotalEUR"])
                 elif r["ProductName"] == "FCR-D upp":
                     fcr_d_up_prices = np.append(fcr_d_up_prices, r["PriceTotalEUR"])
-        return fcr_d_down_prices.min() / 1_000, fcr_d_up_prices.min() / 1_000
+        return fcr_d_down_prices[-1] / 1_000, fcr_d_up_prices[-1] / 1_000
