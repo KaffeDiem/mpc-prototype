@@ -134,10 +134,21 @@ def setup_csv_file(timestamp: str) -> Tuple[TextIO, Any, str]:
     
     # Write CSV headers
     csv_writer.writerow([
-        'timestamp', 'step', 'current_temp_c', 'ambient_temp_c', 
-        'action', 'watts_on', 'spot_price', 'heating_rate', 
-        'cooling_coeff', 'predicted_temp_c', 'predicted_power',
-        'cost_eur_per_step', 'cumulative_cost_eur'
+        'step',
+        'datetime',
+        'action',
+        'watts_on',
+        'current_temp_c',
+        'ambient_temp_c',
+        'current_spot_price_eur_kwh',
+        'heating_rate_k_per_step',
+        'cooling_coefficient',
+        'predicted_next_temp_c',
+        'predicted_cost_eur',
+        'fcr_revenue_eur',
+        'cumulative_cost_eur',
+        'fcr_d_down_price_eur',
+        'fcr_d_up_price_eur'
     ])
     
     return csv_file, csv_writer, csv_filename
@@ -150,11 +161,9 @@ def log_step_to_csv(
     ambient_temp_c: float,
     action: Action,
     watts_on: float,
-    current_spot_price: float,
     heating_rate: float,
     cooling_coeff: float,
     predicted_temperature_k: float,
-    predicted_power: float,
     spot_price: float,
     predicted_cost: float,
     fcr_revenue: float,
@@ -164,18 +173,16 @@ def log_step_to_csv(
 ) -> None:
     """Log a single step's data to CSV."""
     csv_writer.writerow([
-        datetime.now().isoformat(),
         step_counter,
-        kelvin_to_celsius(current_temperature_k),
-        ambient_temp_c,
+        datetime.now().isoformat(),
         action.name,
         watts_on,
-        current_spot_price,
+        kelvin_to_celsius(current_temperature_k),
+        ambient_temp_c,
+        spot_price,
         heating_rate,
         cooling_coeff,
         kelvin_to_celsius(predicted_temperature_k),
-        predicted_power,
-        spot_price,
         predicted_cost,
         fcr_revenue,
         cumulative_cost_eur,
@@ -344,11 +351,9 @@ def main():
             ambient_temp_c=ambient_temp_c,
             action=prediction.trajectory[0].action,
             watts_on=actual_watts,  # Log actual measured watts
-            current_spot_price=prediction.trajectory[0].spot_price,
             heating_rate=controller.theta[0],
             cooling_coeff=controller.theta[1],
             predicted_temperature_k=prediction.trajectory[0].predicted_temperature,
-            predicted_power=prediction.predicted_power,
             spot_price=prediction.trajectory[0].spot_price,
             predicted_cost=prediction.trajectory[0].predicted_cost,
             fcr_revenue=prediction.trajectory[0].fcr_revenue,
