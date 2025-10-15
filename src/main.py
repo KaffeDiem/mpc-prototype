@@ -336,7 +336,7 @@ def main():
 
     # Initialize control loop state
     step_counter = 0
-    cumulative_cost_dkk = 0.0
+    cumulative_cost_eur = 0.0
     prices = []
     last_price_fetch_time = 0  # Force initial fetch
     fcr_d_down_price, fcr_d_up_price = fcr_service.get_fcr_prices()
