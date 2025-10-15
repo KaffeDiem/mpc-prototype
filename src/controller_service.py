@@ -43,8 +43,10 @@ class Action(Enum):
 class TrajectoryStep:
     action: Action
     predicted_temperature: float  # Kelvin
-    predicted_cost: float  # DKK for this step
-    price: float  # DKK/kWh for this step
+    predicted_cost: float  # EUR for this step
+    price: float  # EUR/kWh for this step
+    fcr_revenue: float  # EUR for this step
+    net_cost: float  # EUR for this step (predicted_cost - fcr_revenue)
 
 
 @dataclass
@@ -138,7 +140,9 @@ class ControllerService:
         ambient_temp: float,
         future_prices: list[float],
         watts_on: float,
-        optimization_steps: int
+        optimization_steps: int,
+        fcr_d_down_price: float,
+        fcr_d_up_price: float
     ) -> list[Action]:
         """
         Solve optimal ON/OFF heating schedule via dynamic programming.
@@ -177,9 +181,15 @@ class ControllerService:
             
             # Compute cost for OFF action at each state
             cost_off = penalty_lut[next_idx_off] + V[t + 1, next_idx_off]
+            # Up-regulating is the same as turning off to release electricity.
+            # So we subtract the FCR-D up price.
+            cost_off -= fcr_d_up_price * (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
             
             # Compute cost for ON action at each state
             cost_on = energy_cost + penalty_lut[next_idx_on] + V[t + 1, next_idx_on]
+            # Down-regulating is the same as turning on to use electricity.
+            # So we subtract the FCR-D down price.
+            cost_on -= fcr_d_down_price * (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
             
             # Choose better action at each state
             better_is_on = cost_on < cost_off
@@ -208,6 +218,8 @@ class ControllerService:
         future_prices: list[float],
         ambient_temp: float,
         watts_on: float,
+        fcr_d_down_price: float,
+        fcr_d_up_price: float
     ) -> ControllerServiceResult:
         """
         Determine the next action (ON/OFF) for the system using dynamic programming
@@ -223,7 +235,9 @@ class ControllerService:
             ambient_temp=ambient_temp,
             future_prices=future_prices,
             watts_on=watts_on,
-            optimization_steps=optimization_steps
+            optimization_steps=optimization_steps,
+            fcr_d_down_price=fcr_d_down_price,
+            fcr_d_up_price=fcr_d_up_price
         )
 
         # Build detailed trajectory with temperature and cost predictions
@@ -232,7 +246,9 @@ class ControllerService:
             initial_temp=current_temp,
             ambient_temp=ambient_temp,
             future_prices=future_prices,
-            watts_on=watts_on
+            watts_on=watts_on,
+            fcr_d_down_price=fcr_d_down_price,
+            fcr_d_up_price=fcr_d_up_price
         )
 
         return ControllerServiceResult(
@@ -357,17 +373,15 @@ class ControllerService:
         heating_delta = self.thermal_system.heating_rate_k_per_step if action == Action.ON else 0.0
         return heating_delta + cooling_delta
 
-    def plot(self, save_path: str):
-        # Implement plotting logic for visualizing predictions
-        pass
-
     def _build_trajectory_with_details(
         self,
         actions: list[Action],
         initial_temp: float,
         ambient_temp: float,
         future_prices: list[float],
-        watts_on: float
+        watts_on: float,
+        fcr_d_down_price: float,
+        fcr_d_up_price: float
     ) -> list[TrajectoryStep]:
         """
         Build a detailed trajectory with temperature, cost, and price for each step.
@@ -397,18 +411,23 @@ class ControllerService:
             next_temp = self._predict_future_temperature(action, current_temp, ambient_temp)
 
             # Calculate cost for this step
+            fcr_revenue = 0.0
             if action == Action.ON:
                 energy_kwh = (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
                 cost = energy_kwh * price
+                fcr_revenue = fcr_d_up_price * (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
             else:
                 cost = 0.0
+                fcr_revenue = fcr_d_down_price * (watts_on / 1000.0) * (1.0 / self.config.steps_per_hour)
 
             # Store trajectory step
             trajectory.append(TrajectoryStep(
                 action=action,
                 predicted_temperature=next_temp,
                 predicted_cost=cost,
-                price=price
+                price=price,
+                fcr_revenue=fcr_revenue,
+                net_cost=cost - fcr_revenue
             ))
 
             # Update for next iteration

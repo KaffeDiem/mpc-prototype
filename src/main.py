@@ -371,7 +371,9 @@ def main():
             current_temp=current_temperature_k,
             future_prices=future_price_list,
             ambient_temp=ambient_temp_k,
-            watts_on=expected_watts_on
+            watts_on=expected_watts_on,
+            fcr_d_down_price=fcr_d_down_price,
+            fcr_d_up_price=fcr_d_up_price
         )
 
         # ===== EXECUTE ACTION =====
