@@ -1,6 +1,7 @@
 """Simple example usage of the PricesService to fetch Danish electricity prices."""
 
 from datetime import date, datetime, timedelta
+from math import exp
 import time
 import logging
 import csv
@@ -274,14 +275,6 @@ def main():
     # Use "DK1" for Aarhus/West of Great Belt
     price_service, weather_service, smart_plug_service, thermometer_service, fcr_service = initialize_services("DK2")
     
-    # Initialize controller
-    controller = initialize_controller(
-        weather_service=weather_service,
-        steps_per_hour=steps_per_hour,
-        temp_min_celsius=20.0,
-        temp_max_celsius=24.0
-    )
-    
     # Perform initial measurements
     expected_watts_on = perform_initial_measurements(smart_plug_service)
 
@@ -297,89 +290,54 @@ def main():
         tomorrow = today + timedelta(days=1)
         prices = fetch_prices(price_service, today, tomorrow)
 
-        new_fcr_d_down_price, new_fcr_d_up_price = fcr_service.get_fcr_prices()
-        if new_fcr_d_down_price == 0 or new_fcr_d_up_price == 0:
-            logging.warning("No FCR prices available, skipping this iteration")
-        else:
-            fcr_d_down_price = new_fcr_d_down_price
-            fcr_d_up_price = new_fcr_d_up_price
-
-        if not prices or len(prices) == 0:
-            logging.warning("No prices available, skipping this iteration")
-            time.sleep(seconds_per_step)
-            continue
-
-        if not fcr_d_down_price or not fcr_d_up_price:
-            logging.warning("No FCR prices available, skipping this iteration")
-            time.sleep(seconds_per_step)
-            continue
-
         # ===== MEASURE CURRENT STATE =====
-        current_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
-        ambient_temp_c = weather_service.get_current_temperature()
-        ambient_temp_k = celsius_to_kelvin(ambient_temp_c)
+        current_temperature_c = thermometer_service.get_current_temperature()
+        current_temperature_k = celsius_to_kelvin(current_temperature_c)
         future_price_list = prepare_future_prices(prices)
+        current_spot_price = future_price_list[0]
 
         # ===== PREDICT NEXT ACTION =====
         # Use expected_watts_on for prediction to ensure predicted_power matches the action
-        prediction = controller.get_next_action(
-            current_temp=current_temperature_k,
-            future_prices=future_price_list,
-            ambient_temp=ambient_temp_k,
-            watts_on=expected_watts_on,
-            fcr_d_down_price=fcr_d_down_price,
-            fcr_d_up_price=fcr_d_up_price
-        )
+        action = Action.ON if current_temperature_c < 21.0 else Action.OFF
 
         # ===== EXECUTE ACTION =====
-        actual_watts = execute_action_and_update_watts(prediction.trajectory[0].action, smart_plug_service)
+        actual_watts = execute_action_and_update_watts(action, smart_plug_service)
         expected_watts_on = actual_watts
-        
-        # ===== CALCULATE COSTS =====
-        fcr_revenue = prediction.trajectory[0].fcr_revenue
-        predicted_cost = prediction.trajectory[0].predicted_cost
+        # Current spot price is in EUR/kWh, so we need to convert to EUR/step
+        cost_this_step = expected_watts_on * (current_spot_price / 1000.0 / steps_per_hour)
         
         # ===== LOG DATA =====
         log_step_to_csv(
             csv_writer=csv_writer,
             step_counter=step_counter,
             current_temperature_k=current_temperature_k,
-            ambient_temp_c=ambient_temp_c,
-            action=prediction.trajectory[0].action,
+            ambient_temp_c=0,
+            action=action,
             watts_on=actual_watts,  # Log actual measured watts
-            heating_rate=controller.theta[0],
-            cooling_coeff=controller.theta[1],
-            predicted_temperature_k=prediction.trajectory[0].predicted_temperature,
-            spot_price=prediction.trajectory[0].spot_price,
-            predicted_cost=prediction.trajectory[0].predicted_cost,
-            fcr_revenue=prediction.trajectory[0].fcr_revenue,
-            fcr_d_down_price=fcr_d_down_price,
-            fcr_d_up_price=fcr_d_up_price
+            heating_rate=0,
+            cooling_coeff=0,
+            predicted_temperature_k=0,
+            spot_price=current_spot_price,
+            predicted_cost=cost_this_step,
+            fcr_revenue=0,
+            fcr_d_down_price=0,
+            fcr_d_up_price=0
         )
 
         print_step_info(
             step_counter=step_counter,
-            action=prediction.trajectory[0].action,
+            action=action,
             current_temp_celsius=kelvin_to_celsius(current_temperature_k),
-            ambient_temp_celsius=ambient_temp_c,
-            spot_price=prediction.trajectory[0].spot_price,
-            predicted_cost=prediction.trajectory[0].predicted_cost,
-            fcr_revenue=prediction.trajectory[0].fcr_revenue,
+            ambient_temp_celsius=0,
+            spot_price=current_spot_price,
+            predicted_cost=cost_this_step,
+            fcr_revenue=0,
             fcr_d_down_price=fcr_d_down_price,
             fcr_d_up_price=fcr_d_up_price
         )
-        
-        # ===== PRINT TRAJECTORY DETAILS =====
-        print_trajectory_details(prediction.trajectory)
 
         # ===== WAIT FOR NEXT STEP =====
         time.sleep(seconds_per_step)
-        
-        # ===== UPDATE ADAPTIVE MODEL =====
-        prev_temperature_k = current_temperature_k
-        next_temperature_k = celsius_to_kelvin(thermometer_service.get_current_temperature())
-        next_ambient_temp_k = celsius_to_kelvin(weather_service.get_current_temperature())
-        controller.update_model(prev_temperature_k, prediction.trajectory[0].action, next_temperature_k, next_ambient_temp_k)
         
         step_counter += 1
 
